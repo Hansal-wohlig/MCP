@@ -1,8 +1,8 @@
 import config # Ensures env vars are loaded
-import uvicorn  # <--- 1. RE-ADD this import
+import uvicorn
 import pandas as pd
 from google.cloud import bigquery
-from fastmcp import FastMCP  # This is correct
+from fastmcp import FastMCP
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
@@ -27,7 +27,7 @@ except Exception as e:
     raise
 
 # --- 2. CREATE FastMCP INSTANCE ---
-mcp = FastMCP("MyToolboxServer") # This is correct
+mcp = FastMCP("MyToolboxServer")
 
 # --- 3. Define PDF Tool Logic (Stateless) ---
 pdf_prompt = ChatPromptTemplate.from_messages([
@@ -45,7 +45,7 @@ pdf_prompt = ChatPromptTemplate.from_messages([
 ])
 pdf_generation_chain = pdf_prompt | llm
 
-@mcp.tool  # This is correct
+@mcp.tool
 def ask_upi_document(question: str) -> str:
     """
     Answers questions about the UPI (Unified Payments Interface) process
@@ -85,13 +85,20 @@ sql_prompt = ChatPromptTemplate.from_messages([
     If the question cannot be answered with the given schema, output 'Cannot answer with available data.' instead of a query.
     
     **Key Tips (use your judgment)**:
-    - Interpret analytical requests deeply: For comparisons (e.g., 'compare highest and average'), include derived columns like differences (e.g., highest - average), ratios (e.g., highest / average), or percentages .
+    - For "most frequent" or "main" transaction_type: Use COUNT(*) with GROUP BY and ORDER BY count DESC
+    - For "maximum amount": Use MAX() or ORDER BY amount DESC LIMIT 1
+    - When combining conditions (e.g., "most frequent type AND max amount for that type"):
+      * First identify the most frequent type using COUNT
+      * Then find the max amount for THAT specific type
+      * Join with customers table to get customer name
+    - Interpret analytical requests deeply: For comparisons (e.g., 'compare highest and average'), include derived columns like differences (e.g., highest - average), ratios (e.g., highest / average), or percentages.
     - Add meaningful sorting: Use ORDER BY to sort results in a logical way, such as descending order for differences, amounts, or counts to highlight extremes.
     - Use appropriate joins: Prefer INNER JOIN unless including entities without matches is necessary (e.g., all customers even without transactions).
     - Include relevant aggregations: For per-group stats (e.g., per customer), use GROUP BY and include key identifiers like IDs and names.
     - Enhance with additional insights: If the question implies ranking or filtering, add ROW_NUMBER(), RANK(), or WHERE/HAVING clauses as needed.
     - Keep it concise but comprehensive: Avoid unnecessary columns, but ensure the query fully addresses the question's intent.
-    Ensure tables are referenced as `{config.BIGQUERY_DATASET}.table_name`.
+    - Use CTEs (Common Table Expressions) for complex multi-step queries to improve readability.
+    
     Database schema:
     {schema}
     """),
@@ -161,11 +168,10 @@ def query_customer_database(natural_language_query: str) -> str:
             "result_summary": result_summary_for_llm
         }).content
         return final_summary
-    return final_summary
+
 # --- 5. Run the SINGLE Server ---
 if __name__ == "__main__":
     print("--- Starting Combined MCP Toolbox Server (PDF + BigQuery) ---")
-    
     
     mcp.run(
         transport="sse",     

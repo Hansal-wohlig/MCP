@@ -1,3 +1,4 @@
 .env
 keys
 agent/__pycache__
+data
