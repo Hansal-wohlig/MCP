@@ -1,9 +1,9 @@
 import os
-from .config import PDF_PATH, VECTOR_STORE_PATH, OPENAI_API_KEY
+from config import PDF_PATH, VECTOR_STORE_PATH, GOOGLE_API_KEY
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 def create_vector_store():
     """Create and save FAISS vector store from PDF."""
@@ -21,7 +21,10 @@ def create_vector_store():
 
     print("Creating embeddings...")
     try:
-        embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY)
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="gemini-embedding-001",
+            google_api_key=GOOGLE_API_KEY
+        )
     except Exception as e:
         print(f"Error initializing embeddings: {e}")
         return

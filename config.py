@@ -35,13 +35,15 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") # For agent.py
 PDF_PATH = os.path.join(PROJECT_ROOT, "data", "UPI Transaction Process Explained.pdf")
 # Builds full path to 'MCP/vector_store_openai'
 VECTOR_STORE_PATH_OPENAI = os.path.join(PROJECT_ROOT, "vector_store_openai")
+# Builds full path to 'MCP/vector_store_gemini'
+VECTOR_STORE_PATH = os.path.join(PROJECT_ROOT, "vector_store_gemini")
 
 
 # --- 6. Validation ---
-if not all([GCP_PROJECT_ID, BIGQUERY_DATASET, OPENAI_API_KEY, GOOGLE_API_KEY]):
+if not all([GCP_PROJECT_ID, BIGQUERY_DATASET, GOOGLE_API_KEY]):
     raise ValueError(
         "Missing required environment variables from .env file:\n"
-        "GCP_PROJECT_ID, BIGQUERY_DATASET, OPENAI_API_KEY, GOOGLE_API_KEY"
+        "GCP_PROJECT_ID, BIGQUERY_DATASET, GOOGLE_API_KEY"
     )
 
 if not os.path.exists(PDF_PATH):

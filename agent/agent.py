@@ -22,8 +22,8 @@ mcp_tools = MCPToolset(
 root_agent = Agent(
     name="upi_agent",
     model=Gemini(
-        model_name="gemini-1.5-pro-latest",
-        api_key=GOOGLE_API_KEY
+        model_name="gemini-2.5-pro",
+        api_key=GOOGLE_API_KEY,
     ),
     instruction=(
         "You are a friendly and helpful assistant with access to two tools: "

@@ -3,27 +3,27 @@ import uvicorn
 import pandas as pd
 from google.cloud import bigquery
 from fastmcp import FastMCP
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 
 # --- 1. Initialize All Shared Resources ---
 print("Initializing shared resources (LLM, Embeddings, BQ, Vector Store)...")
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=config.OPENAI_API_KEY)
-embeddings = OpenAIEmbeddings(api_key=config.OPENAI_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0, google_api_key=config.GOOGLE_API_KEY)
+embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001", google_api_key=config.GOOGLE_API_KEY)
 bq_client = bigquery.Client(project=config.GCP_PROJECT_ID)
 
 try:
     vector_store = FAISS.load_local(
-        config.VECTOR_STORE_PATH_OPENAI, 
-        embeddings, 
+        config.VECTOR_STORE_PATH,
+        embeddings,
         allow_dangerous_deserialization=True
     )
-    print(f"Successfully loaded vector store from {config.VECTOR_STORE_PATH_OPENAI}")
+    print(f"Successfully loaded vector store from {config.VECTOR_STORE_PATH}")
 except Exception as e:
-    print(f"FATAL: Could not load vector store from {config.VECTOR_STORE_PATH_OPENAI}")
+    print(f"FATAL: Could not load vector store from {config.VECTOR_STORE_PATH}")
     print(f"Error: {str(e)}")
-    print("Please run 'python pdf_indexer.py' first to create the vector store.")
+    print("Please run 'python -m agent.pdf_indexer' first to create the vector store.")
     raise
 
 # --- 2. CREATE FastMCP INSTANCE ---
