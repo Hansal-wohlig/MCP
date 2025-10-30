@@ -1,4 +1,5 @@
 .env
 keys
 agent/__pycache__
-data
+vector_store_gemini/
+data/
