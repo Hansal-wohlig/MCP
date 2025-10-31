@@ -1,15 +1,22 @@
-import config # Ensures env vars are loaded
+import config
 import os
 from google.adk.agents import Agent
 from google.adk.models import Gemini
-# --- Import the MCP tool classes ---
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
+from auth import get_authenticated_user
 
 # --- Configure the Model for Google ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY not found in .env file. Please add it.")
+
+# --- Authenticate user at startup ---
+CURRENT_USER = get_authenticated_user()
+
+if not CURRENT_USER:
+    print("\n❌ Exiting due to authentication failure.")
+    exit(1)
 
 # --- Define the connection to your MCP server ---
 mcp_tools = MCPToolset(
@@ -150,8 +157,11 @@ root_agent = Agent(
 
 # --- Main execution block ---
 if __name__ == "__main__":
+    print("\n" + "=" * 60)
+    print(f"✓ Assistant Ready")
     print("=" * 60)
-    print("Assistant Ready")
+    print(f"👤 Logged in as: {CURRENT_USER}")
+    print(f"🔒 Security: You can only access your own data")
     print("=" * 60)
     print("\nType 'quit' or 'exit' to stop.\n")
     
@@ -161,7 +171,7 @@ if __name__ == "__main__":
             user_input = input("You: ").strip()
             
             if user_input.lower() in ['quit', 'exit', 'q']:
-                print("\nGoodbye!")
+                print("\n👋 Goodbye!")
                 break
             
             if not user_input:
@@ -177,8 +187,8 @@ if __name__ == "__main__":
             print()  # Empty line for better readability
             
         except KeyboardInterrupt:
-            print("\n\nGoodbye!")
+            print("\n\n👋 Goodbye!")
             break
         except Exception as e:
-            print(f"\nError: {str(e)}")
+            print(f"\n❌ Error: {str(e)}")
             print("Please try again or type 'quit' to exit.\n")
