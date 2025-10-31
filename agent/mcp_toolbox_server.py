@@ -154,6 +154,15 @@ def query_customer_database(natural_language_query: str) -> str:
     """
     Answers questions about customer data, transactions, accounts, or
     financial calculations from a BigQuery database.
+    
+    SECURITY: Enforces row-level security - users can only access their own data.
+    
+    Args:
+        natural_language_query: The user's question in natural language
+        current_user: The authenticated user's name (REQUIRED for security)
+    
+    Returns:
+        Query results with SQL query included
     """
     print(f"[BQ Tool] Received query: {natural_language_query}")
     
@@ -172,33 +181,51 @@ def query_customer_database(natural_language_query: str) -> str:
     if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH')):
         return f"I encountered an issue generating a SQL query for your question. Please try rephrasing it or ask about customers, transactions, or transaction amounts."
     
-    # 3. Execute SQL
-    text_result, df_result = _execute_query(sql_query)
+    # Clean SQL for display
+    clean_sql = sql_query.strip().replace("```sql", "").replace("```", "")
     
-    # 4. Decide how to respond
-    if df_result is not None and not df_result.empty:
-        # Case 1: Single value (e.g. COUNT, AVG) → use LLM for nice phrasing
+    # Execute SQL with security validation
+    text_result, df_result = _execute_query(sql_query, current_user)
+    
+    # If execution was blocked, text_result contains the error
+    if df_result is None:
+        return f"[SQL QUERY]\n{clean_sql}\n\n[ERROR]\n{text_result}"
+    
+    # Build response with SQL at the top
+    response_parts = []
+    
+    # SQL Section - Always at the top with clear marker
+    response_parts.append("[SQL QUERY]")
+    response_parts.append(clean_sql)
+    response_parts.append("")
+    response_parts.append("[DATA RESULTS]")
+    response_parts.append("")
+    
+    # Data Section
+    if not df_result.empty:
         if df_result.shape == (1, 1):
-            result_summary_for_llm = f"The query returned a single value: {df_result.iloc[0, 0]}"
-            final_summary = summary_chain.invoke({
-                "question": natural_language_query,
-                "result_summary": result_summary_for_llm
-            }).content
-            return final_summary
-        
-        # Case 2: Full table (e.g. SELECT * FROM customers) → return as Markdown table
-        markdown_table = df_result.to_markdown(index=False)
-        return f"Here is the query result as a table:\n\n{markdown_table}"
-    
+            # Single value
+            value = df_result.iloc[0, 0]
+            if isinstance(value, float):
+                response_parts.append(f"Result: {value:,.2f}")
+            else:
+                response_parts.append(f"Result: {value}")
+        else:
+            # Table
+            response_parts.append(f"Rows: {len(df_result)}")
+            response_parts.append("")
+            table_str = df_result.to_string(
+                index=False,
+                max_colwidth=25,
+                justify='left'
+            )
+            response_parts.append(table_str)
     else:
-        # Case 3: Error or no results → use LLM for polite message
-        result_summary_for_llm = text_result
-        final_summary = summary_chain.invoke({
-            "question": natural_language_query,
-            "result_summary": result_summary_for_llm
-        }).content
-        return final_summary
-# --- 5. Run the SINGLE Server ---
+        response_parts.append("No results found.")
+    
+    return "\n".join(response_parts)
+
+# --- 6. Run the Server ---
 if __name__ == "__main__":
     print("--- Starting Combined MCP Toolbox Server (PDF + BigQuery) ---")
     

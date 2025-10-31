@@ -1,4 +1,4 @@
-customer_id,customer_name,email,phone_number,address,customer_since
+"customer_id","customer_name","email","phone_number","address","customer_since"
 "1","Lorena Moore","April.Swift@hotmail.com","(541) 231-3652","649 Durgan Walk Apt. 344","2023-02-23"
 "2","Lynda Gusikowski","Agustin24@hotmail.com","1-493-588-7485 x8168","55630 5th Street Suite 608","2020-11-30"
 "3","Thomas Feest","Cassidy_Gibson@hotmail.com","(456) 657-8083 x2331","9018 Lemke Fork Apt. 452","2023-12-04"
