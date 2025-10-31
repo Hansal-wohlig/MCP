@@ -1,15 +1,22 @@
-import config # Ensures env vars are loaded
+import config
 import os
 from google.adk.agents import Agent
 from google.adk.models import Gemini
-# --- Import the MCP tool classes ---
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
+from auth import get_authenticated_user
 
 # --- Configure the Model for Google ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY not found in .env file. Please add it.")
+
+# --- Authenticate user at startup ---
+CURRENT_USER = get_authenticated_user()
+
+if not CURRENT_USER:
+    print("\n❌ Exiting due to authentication failure.")
+    exit(1)
 
 # --- Define the connection to your MCP server ---
 mcp_tools = MCPToolset(
@@ -26,17 +33,29 @@ root_agent = Agent(
         api_key=GOOGLE_API_KEY,
     ),
     instruction=(
-        "You are a friendly and helpful assistant with access to two tools: "
-        "1. `ask_upi_document`: For UPI process, features, security, or history questions. "
-        "2. `query_customer_database`: For customer transactions, accounts, or calculations. "
-        "\n\n"
-        "CRITICAL: Always use FULL chat history for context. When a user asks follow-ups (e.g., 'average amount' after 'show Tony Toy's transactions'), "
-        "formulate a *standalone, contextualized query* for the tool (e.g., 'average transaction amount for Tony Toy'). "
-        "Do NOT send bare queries—include names/dates/filters from prior messages to avoid wrong results. "
-        "If unclear, ask for clarification before tool call."
-        "\n\n"
-        "When presenting data results, be clear and conversational. For tables, present them in a readable format. "
-        "For single values or simple answers, provide context and explanation."
+        f"You are a friendly and helpful assistant with access to two tools: "
+        f"1. `ask_upi_document`: For UPI process, features, security, or history questions. "
+        f"2. `query_customer_database`: For customer transactions, accounts, or calculations. "
+        f"\n\n"
+        f"IMPORTANT SECURITY CONTEXT:"
+        f"- Current authenticated user: '{CURRENT_USER}'"
+        f"- This user can ONLY access their own data"
+        f"- You MUST enforce row-level security for all database queries"
+        f"\n\n"
+        f"WHEN CALLING query_customer_database:"
+        f"- ALWAYS pass current_user='{CURRENT_USER}' as a parameter"
+        f"- Convert user questions like 'my transactions' to 'transactions for {CURRENT_USER}'"
+        f"- If user asks about 'all customers' or other user names, politely explain they can only see their own data"
+        f"- For any database query, ensure it's scoped to '{CURRENT_USER}'"
+        f"\n\n"
+        f"EXAMPLES OF CORRECT TOOL CALLS:"
+        f"- User asks 'show my transactions' → query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}')"
+        f"- User asks 'what is my average transaction amount' → query_customer_database('average transaction amount for {CURRENT_USER}', current_user='{CURRENT_USER}')"
+        f"- User asks 'my account details' → query_customer_database('account details for {CURRENT_USER}', current_user='{CURRENT_USER}')"
+        f"\n\n"
+        f"Always use FULL chat history for context. When a user asks follow-ups, formulate standalone queries."
+        f"\n\n"
+        f"When presenting data results, be clear and conversational."
     ),
     tools=[
         mcp_tools
@@ -45,8 +64,11 @@ root_agent = Agent(
 
 # --- Main execution block ---
 if __name__ == "__main__":
+    print("\n" + "=" * 60)
+    print(f"✓ Assistant Ready")
     print("=" * 60)
-    print("Assistant Ready")
+    print(f"👤 Logged in as: {CURRENT_USER}")
+    print(f"🔒 Security: You can only access your own data")
     print("=" * 60)
     print("\nType 'quit' or 'exit' to stop.\n")
     
@@ -56,7 +78,7 @@ if __name__ == "__main__":
             user_input = input("You: ").strip()
             
             if user_input.lower() in ['quit', 'exit', 'q']:
-                print("\nGoodbye!")
+                print("\n👋 Goodbye!")
                 break
             
             if not user_input:
@@ -72,8 +94,8 @@ if __name__ == "__main__":
             print()  # Empty line for better readability
             
         except KeyboardInterrupt:
-            print("\n\nGoodbye!")
+            print("\n\n👋 Goodbye!")
             break
         except Exception as e:
-            print(f"\nError: {str(e)}")
+            print(f"\n❌ Error: {str(e)}")
             print("Please try again or type 'quit' to exit.\n")
