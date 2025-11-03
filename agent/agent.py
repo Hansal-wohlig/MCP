@@ -6,17 +6,29 @@ from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
 from auth import get_authenticated_user
 
-# --- Configure the Model for Google ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY not found in .env file. Please add it.")
-
 # --- Authenticate user at startup ---
 CURRENT_USER = get_authenticated_user()
 
 if not CURRENT_USER:
     print("\n❌ Exiting due to authentication failure.")
     exit(1)
+
+# --- Verify GCP Configuration ---
+if not hasattr(config, 'GCP_PROJECT_ID') or not config.GCP_PROJECT_ID:
+    raise ValueError("GCP_PROJECT_ID not found in config. Please add it.")
+
+if not hasattr(config, 'GCP_LOCATION'):
+    # Set default location if not specified
+    config.GCP_LOCATION = "us-central1"
+    print(f"⚠️  GCP_LOCATION not set in config. Using default: {config.GCP_LOCATION}")
+
+print(f"\n{'='*60}")
+print(f"🔧 VERTEX AI CONFIGURATION")
+print(f"{'='*60}")
+print(f"Project ID: {config.GCP_PROJECT_ID}")
+print(f"Location: {config.GCP_LOCATION}")
+print(f"Model: gemini-2.0-flash-exp")
+print(f"{'='*60}\n")
 
 # --- Define the connection to your MCP server ---
 mcp_tools = MCPToolset(
@@ -25,12 +37,16 @@ mcp_tools = MCPToolset(
     )
 )
 
-# --- Define the Main Agent ---
+# --- Define the Main Agent with Vertex AI ---
 root_agent = Agent(
     name="upi_agent",
     model=Gemini(
-        model_name="gemini-2.5-pro",
-        api_key=GOOGLE_API_KEY,
+        model_name="gemini-2.0-flash-exp",  # Available Vertex AI models:
+                                             # - gemini-2.0-flash-exp (fast, cost-effective)
+                                             # - gemini-1.5-pro (balanced)
+                                             # - gemini-1.5-flash (fastest)
+        project=config.GCP_PROJECT_ID,
+        location=config.GCP_LOCATION,
     ),
     instruction=(
         f"You are a friendly and helpful assistant with access to two tools:\n"
@@ -158,10 +174,11 @@ root_agent = Agent(
 # --- Main execution block ---
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print(f"✓ Assistant Ready")
+    print(f"✓ Assistant Ready (Vertex AI)")
     print("=" * 60)
     print(f"👤 Logged in as: {CURRENT_USER}")
     print(f"🔒 Security: You can only access your own data")
+    print(f"🌐 Using: Vertex AI ({config.GCP_PROJECT_ID})")
     print("=" * 60)
     print("\nType 'quit' or 'exit' to stop.\n")
     

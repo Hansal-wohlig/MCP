@@ -4,7 +4,7 @@ import pandas as pd
 import re
 from google.cloud import bigquery
 from fastmcp import FastMCP
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, Tuple
@@ -13,27 +13,45 @@ from typing import Optional, Tuple
 from schema_utils import (
     fetch_bigquery_schema, 
     format_schema_for_llm,
-    generate_all_table_contexts  # NEW!
+    generate_all_table_contexts
 )
 
-from table_context import ACCESS_CONTROL  # ADD THIS LINE
+from table_context import ACCESS_CONTROL
 
 # --- 1. Initialize All Shared Resources ---
 print("\n" + "="*60)
-print("🚀 INITIALIZING MCP TOOLBOX SERVER")
+print("🚀 INITIALIZING MCP TOOLBOX SERVER (VERTEX AI)")
 print("="*60)
 
-print("\n[1/5] Initializing AI models...")
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-pro", 
-    temperature=0, 
-    google_api_key=config.GOOGLE_API_KEY
+# Verify GCP Configuration
+if not hasattr(config, 'GCP_PROJECT_ID') or not config.GCP_PROJECT_ID:
+    raise ValueError("GCP_PROJECT_ID not found in config. Please add it.")
+
+if not hasattr(config, 'GCP_LOCATION'):
+    config.GCP_LOCATION = "us-central1"
+    print(f"⚠️  GCP_LOCATION not set in config. Using default: {config.GCP_LOCATION}")
+
+print(f"\n📍 Vertex AI Configuration:")
+print(f"   Project: {config.GCP_PROJECT_ID}")
+print(f"   Location: {config.GCP_LOCATION}")
+
+print("\n[1/5] Initializing AI models with Vertex AI...")
+llm = ChatVertexAI(
+    model_name="gemini-1.5-pro",  # Available models:
+                                   # - gemini-2.0-flash-exp (fast, cost-effective)
+                                   # - gemini-1.5-pro (balanced)
+                                   # - gemini-1.5-flash (fastest)
+    project=config.GCP_PROJECT_ID,
+    location=config.GCP_LOCATION,
+    temperature=0,
 )
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="gemini-embedding-001", 
-    google_api_key=config.GOOGLE_API_KEY
+
+embeddings = VertexAIEmbeddings(
+    model_name="text-embedding-004",  # Vertex AI embedding model
+    project=config.GCP_PROJECT_ID,
+    location=config.GCP_LOCATION,
 )
-print("✓ LLM and Embeddings initialized")
+print("✓ LLM and Embeddings initialized (Vertex AI)")
 
 print("\n[2/5] Connecting to BigQuery...")
 bq_client = bigquery.Client(project=config.GCP_PROJECT_ID)
@@ -48,8 +66,8 @@ except Exception as e:
     print(f"❌ ERROR: Could not fetch schema: {str(e)}")
     raise
 
-# --- Generate Table Contexts with Gemini (NEW!) ---
-print("\n[4/5] Generating intelligent table contexts using Gemini...")
+# --- Generate Table Contexts with Gemini via Vertex AI ---
+print("\n[4/5] Generating intelligent table contexts using Gemini (Vertex AI)...")
 try:
     table_contexts = generate_all_table_contexts(schema_info, llm)
     formatted_schema = format_schema_for_llm(schema_info, table_contexts)
@@ -82,7 +100,7 @@ except Exception as e:
     raise
 
 print("\n" + "="*60)
-print("✅ ALL RESOURCES INITIALIZED SUCCESSFULLY")
+print("✅ ALL RESOURCES INITIALIZED SUCCESSFULLY (VERTEX AI)")
 print("="*60 + "\n")
 
 # --- 2. CREATE FastMCP INSTANCE ---
@@ -397,8 +415,10 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
 # --- 6. Run the Server ---
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 Starting Combined MCP Toolbox Server (PDF + BigQuery)")
+    print("🚀 Starting Combined MCP Toolbox Server (VERTEX AI)")
     print("=" * 60)
+    print(f"🌐 Project: {config.GCP_PROJECT_ID}")
+    print(f"📍 Location: {config.GCP_LOCATION}")
     print(f"🔒 Row-Level Security: {'ENABLED' if ACCESS_CONTROL['enabled'] else 'DISABLED'}")
     print("=" * 60)
     
