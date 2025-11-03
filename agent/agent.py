@@ -27,7 +27,7 @@ print(f"🔧 VERTEX AI CONFIGURATION")
 print(f"{'='*60}")
 print(f"Project ID: {config.GCP_PROJECT_ID}")
 print(f"Location: {config.GCP_LOCATION}")
-print(f"Model: gemini-2.0-flash-exp")
+print(f"Model: gemini-2.5-flash")
 print(f"{'='*60}\n")
 
 # --- Define the connection to your MCP server ---
@@ -41,8 +41,8 @@ mcp_tools = MCPToolset(
 root_agent = Agent(
     name="upi_agent",
     model=Gemini(
-        model_name="gemini-2.0-flash-exp",  # Available Vertex AI models:
-                                             # - gemini-2.0-flash-exp (fast, cost-effective)
+        model_name="gemini-2.5-flash",  # Available Vertex AI models:
+                                             # - gemini-2.5-flash (fast, cost-effective)
                                              # - gemini-1.5-pro (balanced)
                                              # - gemini-1.5-flash (fastest)
         project=config.GCP_PROJECT_ID,

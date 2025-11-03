@@ -37,8 +37,8 @@ print(f"   Location: {config.GCP_LOCATION}")
 
 print("\n[1/5] Initializing AI models with Vertex AI...")
 llm = ChatVertexAI(
-    model_name="gemini-1.5-pro",  # Available models:
-                                   # - gemini-2.0-flash-exp (fast, cost-effective)
+    model_name="gemini-2.5-flash",  # Available models:
+                                   # - gemini-2.5-flash (fast, cost-effective)
                                    # - gemini-1.5-pro (balanced)
                                    # - gemini-1.5-flash (fastest)
     project=config.GCP_PROJECT_ID,
