@@ -41,10 +41,7 @@ mcp_tools = MCPToolset(
 root_agent = Agent(
     name="upi_agent",
     model=Gemini(
-        model_name="gemini-2.5-flash",  # Available Vertex AI models:
-                                             # - gemini-2.5-flash (fast, cost-effective)
-                                             # - gemini-1.5-pro (balanced)
-                                             # - gemini-1.5-flash (fastest)
+        model_name="gemini-2.5-flash",
         project=config.GCP_PROJECT_ID,
         location=config.GCP_LOCATION,
     ),
