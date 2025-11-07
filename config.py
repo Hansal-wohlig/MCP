@@ -49,3 +49,36 @@ if not all([GCP_PROJECT_ID, BIGQUERY_DATASET, GOOGLE_API_KEY]):
 
 if not os.path.exists(PDF_PATH):
      print(f"Warning: PDF_PATH not found at {PDF_PATH}")
+
+
+# Add to your config.py
+
+# Query Performance Settings
+QUERY_PERFORMANCE = {
+    'default_page_size': 100,
+    'max_page_size': 1000,
+    'max_rows_without_pagination': 500,  # Auto-fail queries returning more than this
+    'query_timeout_seconds': 300,  # 5 minutes max
+    'enable_query_cache': True,
+    'cache_ttl_seconds': 3600,  # 1 hour
+}
+
+# BigQuery Performance Optimization
+BIGQUERY_SETTINGS = {
+    'use_query_cache': True,
+    'use_legacy_sql': False,
+    'maximum_bytes_billed': 10 * 1024 * 1024 * 1024,  # 10 GB limit
+    'priority': 'INTERACTIVE',  # or 'BATCH' for large queries
+    'labels': {
+        'application': 'mcp-server',
+        'environment': 'production'
+    }
+}
+
+# Query Optimization Hints
+OPTIMIZATION_HINTS = {
+    'prefer_aggregations': True,  # Suggest aggregations over full scans
+    'recommend_indexes': True,     # Suggest creating indexes
+    'warn_on_large_scans': True,   # Warn if query scans > 1 GB
+    'bytes_scanned_warning_threshold': 1 * 1024 * 1024 * 1024  # 1 GB
+}

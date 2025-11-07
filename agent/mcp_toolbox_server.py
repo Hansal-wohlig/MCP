@@ -409,6 +409,345 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     
     return "\n".join(response_parts)
 
+
+@mcp.tool
+def get_customer_summary_statistics(
+    metric_type: str,
+    current_user: str = None,
+    time_period: str = None,
+    group_by: str = None
+) -> str:
+    """
+    Get aggregated summary statistics without returning individual rows.
+    Optimized for large datasets (crores of records).
+    
+    Args:
+        metric_type: Type of summary - 'total_spending', 'transaction_count', 
+                    'average_amount', 'monthly_breakdown', 'category_summary'
+        current_user: Authenticated user name (REQUIRED)
+        time_period: Optional filter like 'last_30_days', 'this_year', 'last_month'
+        group_by: Optional grouping like 'month', 'category', 'transaction_type'
+    
+    Returns:
+        Summary statistics without individual transaction rows
+    """
+    if not current_user:
+        return "🚫 Access Denied: Authentication required."
+    
+    print(f"[Summary Stats] User: {current_user}, Metric: {metric_type}")
+    
+    # Build WHERE clause with time filter
+    time_filter = ""
+    if time_period == 'last_30_days':
+        time_filter = "AND t.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)"
+    elif time_period == 'this_year':
+        time_filter = "AND EXTRACT(YEAR FROM t.transaction_date) = EXTRACT(YEAR FROM CURRENT_DATE())"
+    elif time_period == 'last_month':
+        time_filter = "AND t.transaction_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH) AND t.transaction_date < DATE_TRUNC(CURRENT_DATE(), MONTH)"
+    
+    base_query = f"""
+    FROM {config.BIGQUERY_DATASET}.transactions t
+    JOIN {config.BIGQUERY_DATASET}.customers c ON t.customer_id = c.customer_id
+    WHERE c.customer_name = '{current_user}'
+    {time_filter}
+    """
+    
+    # Build aggregation query based on metric type
+    if metric_type == 'total_spending':
+        sql = f"""
+        SELECT 
+            SUM(CASE WHEN t.transaction_type = 'Debit' THEN t.transaction_amount ELSE 0 END) as total_debits,
+            SUM(CASE WHEN t.transaction_type = 'Credit' THEN t.transaction_amount ELSE 0 END) as total_credits,
+            SUM(CASE WHEN t.transaction_type = 'Debit' THEN t.transaction_amount ELSE -t.transaction_amount END) as net_spending
+        {base_query}
+        """
+    
+    elif metric_type == 'transaction_count':
+        sql = f"""
+        SELECT 
+            COUNT(*) as total_transactions,
+            COUNT(CASE WHEN t.transaction_type = 'Debit' THEN 1 END) as debit_count,
+            COUNT(CASE WHEN t.transaction_type = 'Credit' THEN 1 END) as credit_count
+        {base_query}
+        """
+    
+    elif metric_type == 'average_amount':
+        sql = f"""
+        SELECT 
+            AVG(t.transaction_amount) as avg_amount,
+            MIN(t.transaction_amount) as min_amount,
+            MAX(t.transaction_amount) as max_amount,
+            STDDEV(t.transaction_amount) as std_deviation
+        {base_query}
+        """
+    
+    elif metric_type == 'monthly_breakdown' or group_by == 'month':
+        sql = f"""
+        SELECT 
+            FORMAT_DATE('%Y-%m', t.transaction_date) as month,
+            COUNT(*) as transaction_count,
+            SUM(t.transaction_amount) as total_amount,
+            AVG(t.transaction_amount) as avg_amount
+        {base_query}
+        GROUP BY month
+        ORDER BY month DESC
+        LIMIT 12
+        """
+    
+    elif metric_type == 'category_summary' or group_by == 'category':
+        sql = f"""
+        SELECT 
+            t.transaction_category,
+            COUNT(*) as transaction_count,
+            SUM(t.transaction_amount) as total_amount,
+            AVG(t.transaction_amount) as avg_amount
+        {base_query}
+        GROUP BY t.transaction_category
+        ORDER BY total_amount DESC
+        LIMIT 20
+        """
+    
+    else:
+        return f"❌ Unknown metric_type: {metric_type}. Use: total_spending, transaction_count, average_amount, monthly_breakdown, category_summary"
+    
+    # Execute query
+    text_result, df_result = _execute_query(sql, current_user)
+    
+    if df_result is None:
+        return f"[SQL QUERY]\n{sql}\n\n[ERROR]\n{text_result}"
+    
+    # Format response
+    response_parts = [
+        "[SQL QUERY]",
+        sql,
+        "",
+        "[SUMMARY RESULTS]",
+        ""
+    ]
+    
+    if not df_result.empty:
+        response_parts.append(df_result.to_string(index=False))
+    else:
+        response_parts.append("No data found for this period.")
+    
+    return "\n".join(response_parts)
+
+
+
+@mcp.tool
+def query_customer_database_paginated(
+    natural_language_query: str, 
+    current_user: str = None,
+    page: int = 1,
+    page_size: int = 100,
+    order_by: str = None
+) -> str:
+    """
+    Query customer database with pagination for large result sets.
+    
+    Args:
+        natural_language_query: The user's question in natural language
+        current_user: The authenticated user's name (REQUIRED)
+        page: Page number (starts at 1)
+        page_size: Number of rows per page (default 100, max 1000)
+        order_by: Column to sort by (optional, e.g., 'transaction_date DESC')
+    
+    Returns:
+        Paginated query results with metadata
+    """
+    print(f"\n{'='*60}")
+    print(f"[BQ Paginated] Query: {natural_language_query}")
+    print(f"[BQ Paginated] User: {current_user}, Page: {page}, Size: {page_size}")
+    print(f"{'='*60}")
+    
+    if not current_user:
+        return "🚫 Access Denied: Authentication required."
+    
+    # Validate page_size
+    page_size = min(max(1, page_size), 1000)  # Limit between 1-1000
+    offset = (page - 1) * page_size
+    
+    # Check access permission
+    is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
+    if not is_allowed:
+        return error_msg
+    
+    # Generate base SQL
+    sql_response = sql_generation_chain.invoke({
+        "question": natural_language_query,
+        "current_user": f"'{current_user}'"
+    })
+    base_sql = sql_response.content.strip().replace("```sql", "").replace("```", "")
+    
+    if "ACCESS_DENIED" in base_sql:
+        return f"🚫 Access Denied: You can only query your own data."
+    
+    # Get total count first (for pagination metadata)
+    count_sql = f"SELECT COUNT(*) as total FROM ({base_sql}) as subquery"
+    
+    try:
+        count_result = bq_client.query(count_sql).to_dataframe()
+        total_rows = int(count_result.iloc[0]['total'])
+        total_pages = (total_rows + page_size - 1) // page_size
+    except Exception as e:
+        total_rows = 0
+        total_pages = 0
+        print(f"[Warning] Could not get count: {e}")
+    
+    # Add pagination to SQL
+    if order_by:
+        paginated_sql = f"{base_sql} ORDER BY {order_by} LIMIT {page_size} OFFSET {offset}"
+    else:
+        paginated_sql = f"{base_sql} LIMIT {page_size} OFFSET {offset}"
+    
+    # Execute with security validation
+    text_result, df_result = _execute_query(paginated_sql, current_user)
+    
+    if df_result is None:
+        return f"[SQL QUERY]\n{paginated_sql}\n\n[ERROR]\n{text_result}"
+    
+    # Build response
+    response_parts = [
+        "[PAGINATION INFO]",
+        f"Page: {page}/{total_pages}",
+        f"Showing rows: {offset + 1}-{min(offset + page_size, total_rows)}",
+        f"Total rows: {total_rows:,}",
+        "",
+        "[SQL QUERY]",
+        paginated_sql,
+        "",
+        "[DATA RESULTS]"
+    ]
+    
+    if not df_result.empty:
+        response_parts.append(f"Rows on this page: {len(df_result)}")
+        response_parts.append("")
+        response_parts.append(df_result.to_string(index=False, max_colwidth=25))
+        
+        if page < total_pages:
+            response_parts.append("")
+            response_parts.append(f"📄 To see next page, use: page={page + 1}")
+    else:
+        response_parts.append("No results on this page.")
+    
+    return "\n".join(response_parts)
+
+@mcp.tool
+def query_customer_database_smart(
+    natural_language_query: str, 
+    current_user: str = None,
+    result_limit: int = 100
+) -> str:
+    """
+    Smart query tool with PERFORMANCE MONITORING and automatic optimization.
+    Shows execution time, data processed, and cost metrics.
+    
+    Args:
+        natural_language_query: User's question in natural language
+        current_user: Authenticated user name (REQUIRED)
+        result_limit: Maximum rows to return (default 100, max 1000)
+    
+    Returns:
+        Query results with performance metrics
+    
+    Examples:
+        query_customer_database_smart('my account details', 'John Doe')
+        query_customer_database_smart('transaction #12345', 'John Doe')
+    """
+    print(f"\n{'='*60}")
+    print(f"[BQ Smart] Query: {natural_language_query}")
+    print(f"[BQ Smart] User: {current_user}, Limit: {result_limit}")
+    print(f"{'='*60}")
+    
+    if not current_user:
+        return "🚫 Access Denied: Authentication required."
+    
+    # Validate limit
+    result_limit = min(max(1, result_limit), 1000)
+    
+    # Check access
+    is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
+    if not is_allowed:
+        return error_msg
+    
+    # Generate SQL
+    sql_response = sql_generation_chain.invoke({
+        "question": natural_language_query,
+        "current_user": f"'{current_user}'"
+    })
+    sql_query = sql_response.content.strip().replace("```sql", "").replace("```", "")
+    
+    if "ACCESS_DENIED" in sql_query:
+        return f"🚫 Access Denied: You can only query your own data."
+    
+    # Add LIMIT if not present
+    if 'LIMIT' not in sql_query.upper():
+        sql_query += f" LIMIT {result_limit}"
+    
+    # Execute with performance tracking
+    import time
+    from google.cloud import bigquery
+    
+    try:
+        job_config = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            use_legacy_sql=False,
+            labels={'user': current_user.replace(' ', '_').lower()}
+        )
+        
+        start_time = time.time()
+        query_job = bq_client.query(sql_query, job_config=job_config)
+        
+        # Validate SQL access
+        is_valid, error_msg = validate_sql_access(sql_query, current_user)
+        if not is_valid:
+            return error_msg
+        
+        results = query_job.result().to_dataframe()
+        execution_time = time.time() - start_time
+        
+        # Collect performance metrics
+        metadata = {
+            'bytes_processed': query_job.total_bytes_processed or 0,
+            'cache_hit': query_job.cache_hit,
+            'execution_time': round(execution_time, 2),
+            'rows_returned': len(results)
+        }
+        
+        print(f"⚡ Performance: {metadata['execution_time']}s, "
+              f"{metadata['bytes_processed'] / (1024**3):.3f} GB, "
+              f"Cache: {metadata['cache_hit']}")
+        
+    except Exception as e:
+        return f"[SQL QUERY]\n{sql_query}\n\n[ERROR]\n{str(e)}"
+    
+    # Build response
+    response_parts = [
+        "[SQL QUERY]",
+        sql_query,
+        "",
+        "[PERFORMANCE METRICS]",
+        f"⚡ Execution Time: {metadata['execution_time']}s",
+        f"📦 Data Processed: {metadata['bytes_processed'] / (1024**3):.4f} GB",
+        f"💾 Cache Hit: {'Yes ✓' if metadata['cache_hit'] else 'No'}",
+        f"📊 Rows Returned: {metadata['rows_returned']:,}",
+        "",
+        "[DATA RESULTS]",
+        ""
+    ]
+    
+    if not results.empty:
+        response_parts.append(results.to_string(index=False, max_colwidth=25))
+        
+        if len(results) >= result_limit:
+            response_parts.append("")
+            response_parts.append(f"⚠️  Results limited to {result_limit} rows. Use pagination for more.")
+    else:
+        response_parts.append("No results found.")
+    
+    return "\n".join(response_parts)
+
+
 # --- 6. Run the Server ---
 if __name__ == "__main__":
     print("\n" + "=" * 60)
