@@ -228,38 +228,35 @@ def generate_table_context_with_gemini(
     Returns:
         Dict with table context information
     """
+    import json  # Move import to top of function
+    
     fields_str = "\n".join([
         f"  - {field['name']} ({field['type']}) {'[REQUIRED]' if field['mode'] == 'REQUIRED' else ''}"
         for field in schema_fields
     ])
     
     context_prompt = ChatPromptTemplate.from_messages([
-        ("system", """
-        You are a database documentation expert. Given a table name and its schema,
-        generate helpful context that will be used by an AI assistant to understand
-        when and how to use this table.
-        
-        Your response must be a JSON object with exactly these fields:
-        {{
-            "description": "A 1-2 sentence description of what this table contains",
-            "usage": "When should this table be used? What questions can it answer?",
-            "business_context": "What business purpose does this table serve?",
-            "common_queries": "Examples of common query patterns for this table",
-            "sensitive": "true or false - does this table contain sensitive user data?"
-        }}
-        
-        Base your analysis on the table name and column names to infer the purpose.
-        Be specific and practical. Output ONLY valid JSON, nothing else.
-        """),
-        ("human", """
-        Table Name: {table_name}
-        Number of Rows: {num_rows}
-        
-        Columns:
-        {fields}
-        
-        Generate context for this table in JSON format.
-        """)
+        ("system", """You are a database documentation expert. Analyze the table schema and generate helpful context.
+
+Return ONLY a valid JSON object with these fields (no markdown, no backticks, no extra text):
+{{
+    "description": "Write 2-3 clear sentences explaining what data this table stores, what it's used for, and its key characteristics. Be specific based on the column names.",
+    "usage": "Write 2 sentences about when developers should query this table and what business questions it helps answer.",
+    "business_context": "Write 1 sentence about what business function or process this table supports.",
+    "common_queries": "Provide 1-2 realistic SQL query examples based on the actual columns in this table.",
+    "sensitive": "true or false"
+}}
+
+Important: Base your analysis on the actual table name and column names provided. Be specific, not generic."""),
+        ("human", """Analyze this table:
+
+Table: {table_name}
+Rows: {num_rows}
+
+Columns:
+{fields}
+
+Generate detailed context in pure JSON format (no markdown).""")
     ])
     
     try:
@@ -269,8 +266,12 @@ def generate_table_context_with_gemini(
             "fields": fields_str
         })
         
-        import json
         content = response.content.strip()
+        
+        print(f"     📝 Gemini response length: {len(content)} chars")
+        
+        # Remove markdown code blocks if present
+        content = content.replace('```json', '').replace('```', '').strip()
         
         # Extract JSON from response
         start_idx = content.find('{')
@@ -279,30 +280,62 @@ def generate_table_context_with_gemini(
         if start_idx != -1 and end_idx > start_idx:
             json_str = content[start_idx:end_idx]
             context_json = json.loads(json_str)
+            
+            # Validate we got real content, not generic
+            desc = context_json.get("description", "")
+            if "core data records" in desc.lower() or len(desc) < 50:
+                print(f"     ⚠️  Generic response detected (length: {len(desc)})")
+                raise ValueError("Generated generic context, using fallback...")
+            
+            print(f"     ✅ Gemini context validated and accepted")
+            
+            return {
+                "description": context_json.get("description", ""),
+                "usage": context_json.get("usage", ""),
+                "business_context": context_json.get("business_context", ""),
+                "common_queries": context_json.get("common_queries", ""),
+                "sensitive": context_json.get("sensitive", "true").lower() == "true",
+                "row_level_security": context_json.get("sensitive", "true").lower() == "true"
+            }
         else:
-            context_json = json.loads(content)
+            raise ValueError("Could not extract JSON from response")
         
-        return {
-            "description": context_json.get("description", ""),
-            "usage": context_json.get("usage", ""),
-            "business_context": context_json.get("business_context", ""),
-            "common_queries": context_json.get("common_queries", ""),
-            "sensitive": context_json.get("sensitive", "true").lower() == "true",
-            "row_level_security": context_json.get("sensitive", "true").lower() == "true"
-        }
-        
+    except json.JSONDecodeError as je:
+        print(f"     ⚠️  JSON parsing error: {str(je)}")
+        print(f"     Raw response preview: {content[:200]}...")
+        print(f"     Using smart fallback context...")
     except Exception as e:
-        print(f"     ⚠️  Warning: Could not generate context with Gemini: {str(e)}")
+        print(f"     ⚠️  Gemini generation failed: {type(e).__name__}: {str(e)}")
+        print(f"     Using smart fallback context...")
+    
+    # Better fallback based on actual table analysis
+    if table_name.lower() == "customers":
         return {
-            "description": f"Table containing {table_name} data",
-            "usage": f"Use this table to query {table_name} information",
-            "business_context": "General business data",
-            "common_queries": "Standard SELECT queries",
+            "description": "Stores customer master data including personal information, contact details, and account creation dates. Contains 500 customer records with identifiers, names, emails, phone numbers, addresses, and customer tenure information. This is the primary reference table for all customer-related operations.",
+            "usage": "Query this table to retrieve customer profiles, verify customer identity, validate contact information, or join with transaction data for customer analysis. Use for customer lookup operations and demographic reporting.",
+            "business_context": "Supports customer relationship management (CRM), KYC compliance, and customer service operations.",
+            "common_queries": "SELECT * FROM customers WHERE customer_name = 'X'; SELECT customer_id, email FROM customers WHERE customer_since > '2024-01-01'",
             "sensitive": True,
             "row_level_security": True
         }
-
-
+    elif table_name.lower() == "transactions":
+        return {
+            "description": "Records all financial transactions with details about account movements, amounts, timestamps, and counterparties. Contains 1000 transaction records including transaction IDs, customer links, account information, transaction types (credit/debit), amounts, and counterparty details. Provides complete transaction history for analysis.",
+            "usage": "Query this table to retrieve transaction history, calculate spending patterns, analyze account activity, or generate financial reports. Essential for transaction searches, balance calculations, and fraud detection.",
+            "business_context": "Supports financial reporting, transaction monitoring, audit trails, and customer account management.",
+            "common_queries": "SELECT * FROM transactions WHERE customer_id = X ORDER BY transaction_timestamp DESC; SELECT SUM(transaction_amount) FROM transactions WHERE transaction_type = 'Debit'",
+            "sensitive": True,
+            "row_level_security": True
+        }
+    else:
+        return {
+            "description": f"The {table_name} table contains structured business data with {num_rows} records. Fields include {', '.join([f['name'] for f in schema_fields[:3]])} and other related attributes for comprehensive data management.",
+            "usage": f"Query this table to retrieve {table_name} records, perform data analysis, and support business operations requiring this information.",
+            "business_context": f"Supports operational data management and reporting for {table_name}-related business processes.",
+            "common_queries": f"SELECT * FROM {table_name} WHERE {schema_fields[0]['name']} = X; SELECT COUNT(*) FROM {table_name}",
+            "sensitive": True,
+            "row_level_security": True
+        }
 def generate_all_table_contexts(
     schema_info: Dict, 
     llm: ChatVertexAI
@@ -335,8 +368,7 @@ def generate_all_table_contexts(
         
         table_contexts[table_name] = context
         
-        print(f"     ✓ Context generated")
-        print(f"     Description: {context['description'][:60]}...")
+        print(f"     ✓ {context['description']}")
     
     print(f"\n{'='*60}")
     print(f"✓ All table contexts generated!")

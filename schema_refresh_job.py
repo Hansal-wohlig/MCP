@@ -4,7 +4,7 @@ Schema Refresh Job
 Run this script via cron every 7 days to refresh the schema cache
 
 Cron setup:
-0 2 * * 0 /path/to/venv/bin/python /path/to/schema_refresh_job.py >> /var/log/schema_refresh.log 2>&1
+0 2 * * 0 /mindgate/bin/python schema_refresh_job.py >> /var/log/schema_refresh.log 2>&1
 
 This runs every Sunday at 2 AM
 """
@@ -44,12 +44,22 @@ def main():
         print("   ✓ BigQuery client initialized")
         
         llm = ChatVertexAI(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-2.0-flash-exp",
             project=config.GCP_PROJECT_ID,
             location=config.GCP_LOCATION,
             temperature=0,
         )
         print("   ✓ Vertex AI LLM initialized")
+        print(f"   Model: gemini-2.0-flash-exp")
+        
+        # Test Gemini connection
+        print("\n1.5. Testing Gemini connection...")
+        try:
+            test_response = llm.invoke("Say 'Connection OK'")
+            print(f"   ✓ Gemini test: {test_response.content[:50]}")
+        except Exception as test_error:
+            print(f"   ⚠️ Gemini test failed: {str(test_error)}")
+            print("   Continuing with fallback context generation...")
         
         # Fetch fresh schema
         print("\n2. Fetching schema from BigQuery...")
