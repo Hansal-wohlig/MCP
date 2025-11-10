@@ -44,13 +44,13 @@ def main():
         print("   ✓ BigQuery client initialized")
         
         llm = ChatVertexAI(
-            model_name="gemini-2.0-flash-exp",
+            model_name="gemini-2.5-flash",
             project=config.GCP_PROJECT_ID,
             location=config.GCP_LOCATION,
             temperature=0,
         )
         print("   ✓ Vertex AI LLM initialized")
-        print(f"   Model: gemini-2.0-flash-exp")
+        print(f"   Model: gemini-2.5-flash")
         
         # Test Gemini connection
         print("\n1.5. Testing Gemini connection...")
