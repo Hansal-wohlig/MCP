@@ -210,6 +210,102 @@ def fetch_bigquery_schema(client: bigquery.Client, dataset_name: str) -> Dict[st
         raise
 
 
+def generate_intelligent_fallback(
+    table_name: str,
+    schema_fields: List[Dict],
+    num_rows: int
+) -> Dict[str, str]:
+    """
+    Generate intelligent fallback context based on table structure analysis.
+    
+    Args:
+        table_name: Name of the table
+        schema_fields: List of field dictionaries
+        num_rows: Number of rows in the table
+    
+    Returns:
+        Dict with generated table context
+    """
+    # Analyze field names to understand table purpose
+    field_names = [f['name'].lower() for f in schema_fields]
+    field_types = {f['name'].lower(): f['type'] for f in schema_fields}
+    
+    # Detect table type patterns
+    has_id = any('id' in name for name in field_names)
+    has_name = any('name' in name for name in field_names)
+    has_email = any('email' in name for name in field_names)
+    has_phone = any('phone' in name for name in field_names)
+    has_address = any('address' in name for name in field_names)
+    has_timestamp = any('timestamp' in name or 'date' in name or 'time' in name for name in field_names)
+    has_amount = any('amount' in name or 'price' in name or 'cost' in name for name in field_names)
+    has_status = any('status' in name for name in field_names)
+    
+    # Build field list for descriptions
+    key_fields = [f['name'] for f in schema_fields[:5]]  # First 5 fields
+    field_list = ", ".join(key_fields)
+    if len(schema_fields) > 5:
+        field_list += f", and {len(schema_fields) - 5} more"
+    
+    # Determine if likely contains sensitive data
+    is_sensitive = has_email or has_phone or has_address or 'ssn' in ' '.join(field_names)
+    
+    # Generate context based on patterns
+    table_type = "general data"
+    if has_email and has_phone and has_name:
+        table_type = "contact/customer information"
+    elif has_amount and has_timestamp:
+        table_type = "transactional records"
+    elif has_status and has_timestamp:
+        table_type = "operational tracking"
+    elif has_name and has_id:
+        table_type = "master data/reference"
+    
+    # Get primary key field (usually first field with 'id' in name)
+    primary_key = next((f['name'] for f in schema_fields if 'id' in f['name'].lower()), schema_fields[0]['name'])
+    
+    # Build description
+    description = (
+        f"The {table_name} table stores {table_type} with {num_rows:,} records. "
+        f"Key fields include {field_list}. "
+        f"This table contains {len(schema_fields)} columns providing comprehensive data for {table_name.replace('_', ' ')} management."
+    )
+    
+    # Build usage
+    usage = (
+        f"Query this table to retrieve and analyze {table_name.replace('_', ' ')} data. "
+        f"Use for lookups by {primary_key}, reporting, and joining with related tables for comprehensive analysis."
+    )
+    
+    # Build business context
+    business_function = "data management and reporting"
+    if has_amount:
+        business_function = "financial tracking and analysis"
+    elif has_status:
+        business_function = "operational monitoring and workflow management"
+    elif has_email or has_phone:
+        business_function = "customer relationship management and communications"
+    
+    business_context = f"Supports {business_function} for {table_name.replace('_', ' ')}-related business processes."
+    
+    # Generate sample queries
+    query1 = f"SELECT * FROM {table_name} WHERE {primary_key} = 'X'"
+    query2 = f"SELECT COUNT(*) FROM {table_name}"
+    if has_timestamp:
+        timestamp_field = next(f['name'] for f in schema_fields if 'timestamp' in f['name'].lower() or 'date' in f['name'].lower())
+        query2 = f"SELECT * FROM {table_name} WHERE {timestamp_field} > '2024-01-01' ORDER BY {timestamp_field} DESC"
+    
+    common_queries = f"{query1}; {query2}"
+    
+    return {
+        "description": description,
+        "usage": usage,
+        "business_context": business_context,
+        "common_queries": common_queries,
+        "sensitive": is_sensitive,
+        "row_level_security": is_sensitive
+    }
+
+
 def generate_table_context_with_gemini(
     table_name: str, 
     schema_fields: List[Dict], 
@@ -228,7 +324,7 @@ def generate_table_context_with_gemini(
     Returns:
         Dict with table context information
     """
-    import json  # Move import to top of function
+    import json
     
     fields_str = "\n".join([
         f"  - {field['name']} ({field['type']}) {'[REQUIRED]' if field['mode'] == 'REQUIRED' else ''}"
@@ -302,40 +398,16 @@ Generate detailed context in pure JSON format (no markdown).""")
         
     except json.JSONDecodeError as je:
         print(f"     ⚠️  JSON parsing error: {str(je)}")
-        print(f"     Raw response preview: {content[:200]}...")
-        print(f"     Using smart fallback context...")
+        print(f"     Raw response preview: {content[:200] if 'content' in locals() else 'N/A'}...")
+        print(f"     Using intelligent fallback context...")
     except Exception as e:
         print(f"     ⚠️  Gemini generation failed: {type(e).__name__}: {str(e)}")
-        print(f"     Using smart fallback context...")
+        print(f"     Using intelligent fallback context...")
     
-    # Better fallback based on actual table analysis
-    if table_name.lower() == "customers":
-        return {
-            "description": "Stores customer master data including personal information, contact details, and account creation dates. Contains 500 customer records with identifiers, names, emails, phone numbers, addresses, and customer tenure information. This is the primary reference table for all customer-related operations.",
-            "usage": "Query this table to retrieve customer profiles, verify customer identity, validate contact information, or join with transaction data for customer analysis. Use for customer lookup operations and demographic reporting.",
-            "business_context": "Supports customer relationship management (CRM), KYC compliance, and customer service operations.",
-            "common_queries": "SELECT * FROM customers WHERE customer_name = 'X'; SELECT customer_id, email FROM customers WHERE customer_since > '2024-01-01'",
-            "sensitive": True,
-            "row_level_security": True
-        }
-    elif table_name.lower() == "transactions":
-        return {
-            "description": "Records all financial transactions with details about account movements, amounts, timestamps, and counterparties. Contains 1000 transaction records including transaction IDs, customer links, account information, transaction types (credit/debit), amounts, and counterparty details. Provides complete transaction history for analysis.",
-            "usage": "Query this table to retrieve transaction history, calculate spending patterns, analyze account activity, or generate financial reports. Essential for transaction searches, balance calculations, and fraud detection.",
-            "business_context": "Supports financial reporting, transaction monitoring, audit trails, and customer account management.",
-            "common_queries": "SELECT * FROM transactions WHERE customer_id = X ORDER BY transaction_timestamp DESC; SELECT SUM(transaction_amount) FROM transactions WHERE transaction_type = 'Debit'",
-            "sensitive": True,
-            "row_level_security": True
-        }
-    else:
-        return {
-            "description": f"The {table_name} table contains structured business data with {num_rows} records. Fields include {', '.join([f['name'] for f in schema_fields[:3]])} and other related attributes for comprehensive data management.",
-            "usage": f"Query this table to retrieve {table_name} records, perform data analysis, and support business operations requiring this information.",
-            "business_context": f"Supports operational data management and reporting for {table_name}-related business processes.",
-            "common_queries": f"SELECT * FROM {table_name} WHERE {schema_fields[0]['name']} = X; SELECT COUNT(*) FROM {table_name}",
-            "sensitive": True,
-            "row_level_security": True
-        }
+    # Generate intelligent fallback based on table analysis
+    return generate_intelligent_fallback(table_name, schema_fields, num_rows)
+
+
 def generate_all_table_contexts(
     schema_info: Dict, 
     llm: ChatVertexAI
@@ -368,7 +440,7 @@ def generate_all_table_contexts(
         
         table_contexts[table_name] = context
         
-        print(f"     ✓ {context['description']}")
+        print(f"     ✓ {context['description'][:80]}...")
     
     print(f"\n{'='*60}")
     print(f"✓ All table contexts generated!")
