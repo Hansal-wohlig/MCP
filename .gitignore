@@ -6,3 +6,4 @@ data/
 data1
 schema_cache
 __pycache__
+mcp_security_audit.log
