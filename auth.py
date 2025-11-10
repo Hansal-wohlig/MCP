@@ -6,7 +6,7 @@ from typing import Optional
 PASSWORD_TO_USER = {
     # Password hash : Username
     hashlib.sha256("tony123".encode()).hexdigest(): "Tony Toy",
-    hashlib.sha256("priya123".encode()).hexdigest(): "Priya Sharma",
+    hashlib.sha256("linda123".encode()).hexdigest(): "Linda James",
     hashlib.sha256("rahul123".encode()).hexdigest(): "Rahul Verma",
     hashlib.sha256("anjali123".encode()).hexdigest(): "Anjali Patel",
     hashlib.sha256("vikram123".encode()).hexdigest(): "Vikram Singh",
@@ -28,7 +28,7 @@ def get_authenticated_user() -> Optional[str]:
     print("=" * 60)
     print("\nAvailable test passwords:")
     print("  - tony123 (Tony Toy)")
-    print("  - priya123 (Priya Sharma)")
+    print("  - linda123 (Linda James)")
     print("  - rahul123 (Rahul Verma)")
     print("  - anjali123 (Anjali Patel)")
     print("  - vikram123 (Vikram Singh)")
