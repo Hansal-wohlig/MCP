@@ -1,17 +1,26 @@
 import config
 import os
+import sys
+# Add parent directory to path to import customer_auth
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from google.adk.agents import Agent
 from google.adk.models import Gemini
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
-from auth import get_authenticated_user
+from customer_auth import CustomerAuthenticator
 
-# --- Authenticate user at startup ---
-CURRENT_USER = get_authenticated_user()
+# --- Authenticate customer at startup ---
+authenticator = CustomerAuthenticator()
+customer = authenticator.get_authenticated_customer()
 
-if not CURRENT_USER:
+if not customer:
     print("\n❌ Exiting due to authentication failure.")
     exit(1)
+
+CURRENT_USER = customer['name']
+CURRENT_USER_VPA = customer['primary_vpa']
+CUSTOMER_ID = customer['customer_id']
 
 # --- Verify GCP Configuration ---
 if not hasattr(config, 'GCP_PROJECT_ID') or not config.GCP_PROJECT_ID:
@@ -48,9 +57,10 @@ root_agent = Agent(
         f"You are a friendly and secure banking assistant with access to two specialized tools:\n"
         f"\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔐 AUTHENTICATED USER: {CURRENT_USER}\n"
+        f"🔐 AUTHENTICATED CUSTOMER: {CURRENT_USER}\n"
+        f"📱 VPA: {CURRENT_USER_VPA}\n"
         f"🔒 SECURITY LEVEL: MAXIMUM (Banking Grade)\n"
-        f"🛡️ ACCESS SCOPE: Personal Data Only\n"
+        f"🛡️ ACCESS SCOPE: Your Personal Data Only\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
@@ -167,13 +177,14 @@ root_agent = Agent(
         f"\n"
         f"1. 🚫 Unauthorized Access Attempts:\n"
         f"   \n"
-        f"   If user requests data about other customers:\n"
-        f"   → Politely explain: 'For security reasons, you can only access your own banking data. You are currently logged in as {CURRENT_USER}.'\n"
+        f"   Customer can ONLY access their own data:\n"
+        f"   → Politely explain: 'For security reasons, you can only access your own banking data. You are logged in as {CURRENT_USER} ({CURRENT_USER_VPA}).'\n"
         f"   \n"
-        f"   Examples:\n"
+        f"   Examples of requests to DENY:\n"
         f"   • 'Show all customers' → DENY\n"
-        f"   • 'What are John's transactions?' → DENY\n"
-        f"   • 'List every user' → DENY\n"
+        f"   • 'What are other people's transactions?' → DENY\n"
+        f"   • 'List all users' → DENY\n"
+        f"   • Any request for data not belonging to {CURRENT_USER_VPA} → DENY\n"
         f"\n"
         f"2. 🛡️ READ-ONLY Access:\n"
         f"   \n"
@@ -322,24 +333,28 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"✓ Secure Banking Assistant Ready")
     print("=" * 60)
-    print(f"👤 Authenticated User: {CURRENT_USER}")
+    print(f"👤 Customer: {CURRENT_USER}")
+    print(f"📱 VPA: {CURRENT_USER_VPA}")
+    print(f"🆔 Customer ID: {CUSTOMER_ID}")
     print(f"🔒 Security Level: Banking Grade (Multi-Layer)")
-    print(f"🛡️ Access Scope: Personal Data Only")
+    print(f"🛡️ Access Scope: Your Personal Data Only")
     print(f"🌐 AI Platform: Vertex AI ({config.GCP_PROJECT_ID})")
     print(f"🔧 Model: gemini-2.5-flash")
     print("\n📋 Security Features Active:")
+    print("   ✓ VPA + PIN Authentication")
     print("   ✓ Query Parser & Validator")
-    print("   ✓ Row-Level Security")
+    print("   ✓ Row-Level Security (Your Data Only)")
     print("   ✓ Rate Limiting (10/min, 100/session)")
     print("   ✓ READ-ONLY Database Access")
     print("   ✓ Comprehensive Audit Logging")
     print("\n🚫 Prohibited Operations:")
     print("   • DELETE, UPDATE, INSERT")
     print("   • Schema modifications")
-    print("   • Access to other users' data")
+    print("   • Access to other customers' data")
     print("\n✅ Allowed Operations:")
-    print("   • SELECT queries (your data only)")
-    print("   • UPI documentation queries")
+    print("   • Query your own transactions")
+    print("   • View your account details")
+    print("   • Ask UPI-related questions")
     print("=" * 60)
     print("\nType 'quit', 'exit', or 'q' to stop.")
     print("All queries are logged for security and compliance.\n")
