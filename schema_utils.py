@@ -2,7 +2,7 @@ import config
 from google.cloud import bigquery
 from typing import Dict, List, Optional
 from datetime import datetime
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_vertexai import ChatVertexAI
 from langchain_core.prompts import ChatPromptTemplate
 
 def fetch_bigquery_schema(client: bigquery.Client, dataset_name: str) -> Dict[str, List[Dict]]:
@@ -74,16 +74,16 @@ def generate_table_context_with_gemini(
     table_name: str, 
     schema_fields: List[Dict], 
     num_rows: int,
-    llm: ChatGoogleGenerativeAI
+    llm: ChatVertexAI
 ) -> Dict[str, str]:
     """
-    Use Gemini to generate intelligent context for a table based on its schema.
+    Use Gemini via Vertex AI to generate intelligent context for a table based on its schema.
     
     Args:
         table_name: Name of the table
         schema_fields: List of field dictionaries with name, type, mode
         num_rows: Number of rows in the table
-        llm: Initialized Gemini LLM instance
+        llm: Initialized Vertex AI Gemini LLM instance
     
     Returns:
         Dict with 'description', 'usage', and other context
@@ -169,20 +169,20 @@ def generate_table_context_with_gemini(
 
 def generate_all_table_contexts(
     schema_info: Dict, 
-    llm: ChatGoogleGenerativeAI
+    llm: ChatVertexAI
 ) -> Dict[str, Dict]:
     """
-    Generate context for all tables using Gemini.
+    Generate context for all tables using Gemini via Vertex AI.
     
     Args:
         schema_info: Schema information from fetch_bigquery_schema
-        llm: Initialized Gemini LLM instance
+        llm: Initialized Vertex AI Gemini LLM instance
     
     Returns:
         Dict mapping table names to their generated contexts
     """
     print(f"\n{'='*60}")
-    print(f"🤖 GENERATING TABLE CONTEXTS WITH GEMINI")
+    print(f"🤖 GENERATING TABLE CONTEXTS WITH GEMINI (Vertex AI)")
     print(f"{'='*60}\n")
     
     table_contexts = {}

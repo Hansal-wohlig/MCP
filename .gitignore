@@ -3,3 +3,7 @@ keys
 agent/__pycache__
 vector_store_gemini/
 data/
+data1
+schema_cache
+__pycache__
+mcp_security_audit.loglogs/

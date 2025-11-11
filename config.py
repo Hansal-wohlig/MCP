@@ -11,6 +11,7 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 # --- 3. Google Cloud Configuration ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")  # Add this line with default
 BIGQUERY_DATASET = os.getenv("BIGQUERY_DATASET")
 
 # Get the relative path from the .env file
