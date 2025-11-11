@@ -1,7 +1,6 @@
 .env
 keys
 agent/__pycache__
-vector_store_gemini/
 data/
 data1
 schema_cache
