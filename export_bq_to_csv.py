@@ -76,14 +76,19 @@ def main():
     tables_config = [
         {
             'name': 'customers',
-            'output': 'data1/customers.csv',
+            'output': 'data2/customers.csv',
             'order_by': 'customer_id'
         },
         {
             'name': 'transactions',
-            'output': 'data1/transactions.csv',
+            'output': 'data2/transactions.csv',
             'order_by': 'transaction_id'
-        }
+        },
+        {
+            'name': 'employees',
+            'output': 'data2/emplyees.csv',
+            'order_by': 'employee_id'
+        } 
     ]
     
     print(f"\nExporting {len(tables_config)} tables with formatted output...\n")
