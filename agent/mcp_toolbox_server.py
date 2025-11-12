@@ -313,18 +313,21 @@ def validate_sql_access(sql_query: str, current_user: str) -> Tuple[bool, str]:
             )
     
     sql_upper = sql_query.upper()
-    
-    # Check for queries without WHERE clause on restricted tables
-    if ("FROM CUSTOMERS" in sql_upper or "FROM TRANSACTIONS" in sql_upper or 
-        f"FROM {config.BIGQUERY_DATASET.upper()}.CUSTOMERS" in sql_upper or
-        f"FROM {config.BIGQUERY_DATASET.upper()}.TRANSACTIONS" in sql_upper):
-        if "WHERE" not in sql_upper:
-            return False, (
-                f"🚫 SECURITY VIOLATION: Query attempts to access all records without filtering.\n"
-                f"   You can only access your own data (authenticated as: '{current_user}').\n"
-                f"   This incident has been logged for audit and compliance."
-            )
-    
+
+    # Check for queries without WHERE clause on restricted tables (both old and new table names)
+    restricted_tables = ["CUSTOMERS", "TRANSACTIONS", "UPI_CUSTOMER", "UPI_TRANSACTION"]
+    dataset_prefix = f"{config.BIGQUERY_DATASET.upper()}."
+
+    for table in restricted_tables:
+        # Check both with and without dataset prefix
+        if (f"FROM {table}" in sql_upper or f"FROM {dataset_prefix}{table}" in sql_upper):
+            if "WHERE" not in sql_upper:
+                return False, (
+                    f"🚫 SECURITY VIOLATION: Query attempts to access all records without filtering.\n"
+                    f"   You can only access your own data (authenticated as: '{current_user}').\n"
+                    f"   This incident has been logged for audit and compliance."
+                )
+
     return True, ""
 
 def _check_access_permission(natural_language_query: str, current_user: str) -> Tuple[bool, str]:
@@ -362,40 +365,63 @@ def _check_access_permission(natural_language_query: str, current_user: str) -> 
 sql_prompt = ChatPromptTemplate.from_messages([
     ("system",
     f"""
-    You are a BigQuery SQL expert. Given a user question and the database schema, 
+    You are a BigQuery SQL expert. Given a user question and the database schema,
     write a valid **BigQuery** SQL query to answer it.
     Only output the SQL query and nothing else - no explanations, no markdown formatting.
     Ensure tables are referenced as `{config.BIGQUERY_DATASET}.table_name`.
-    
+
+    **IMPORTANT TABLE SELECTION**:
+    - ALWAYS use the UPI tables (upi_transaction, upi_customer, upi_merchant, upi_bank)
+    - DO NOT use the old tables (transactions, customers, merchants)
+    - The upi_transaction table contains all transaction data (55,000+ rows)
+    - The old tables are empty and deprecated
+
     **CRITICAL SECURITY RULES**:
     - Current user context: {{current_user}}
+    - User type: {{user_type}} (either 'customer' or 'merchant')
+
+    **FOR CUSTOMERS**:
     - You MUST add row-level security filters to ALL queries
     - ALWAYS include: WHERE customer_name = {{current_user}}
     - For transactions, JOIN with customers and filter: WHERE c.customer_name = {{current_user}}
     - NEVER generate queries that access all customers or other users' data
     - If query asks for data about another user, respond with: "ACCESS_DENIED"
-    
+
+    **FOR MERCHANTS**:
+    - Merchants can see ALL transactions where they are the payee
+    - Filter by: WHERE payee_vpa = {{current_user}} OR merchant_id IN (SELECT merchant_id FROM {config.BIGQUERY_DATASET}.upi_merchant WHERE merchant_vpa = {{current_user}})
+    - Merchants can see aggregate statistics for their transactions
+    - NEVER show customer personal details (names, emails, account numbers) - only show VPAs and transaction data
+
     **SQL Rules**:
     - Always use single quotes for string literals, never double quotes
     - BigQuery is case-sensitive for string comparisons
     - Handle NULL values appropriately using IS NULL or IS NOT NULL
     - Do NOT add LIMIT clause - the system handles this automatically
-    
-    **Query Patterns with Security**:
-    - "my transactions" → 
-      SELECT t.* FROM {config.BIGQUERY_DATASET}.transactions t 
-      JOIN {config.BIGQUERY_DATASET}.customers c ON t.customer_id = c.customer_id 
-      WHERE c.customer_name = {{current_user}}
-    
-    - "my account details" → 
-      SELECT * FROM {config.BIGQUERY_DATASET}.customers 
-      WHERE customer_name = {{current_user}}
-    
-    - "my average transaction amount" → 
-      SELECT AVG(t.transaction_amount) FROM {config.BIGQUERY_DATASET}.transactions t 
-      JOIN {config.BIGQUERY_DATASET}.customers c ON t.customer_id = c.customer_id 
-      WHERE c.customer_name = {{current_user}}
-    
+
+    **Query Patterns with Security for CUSTOMERS**:
+    - "my transactions" →
+      SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
+      JOIN {config.BIGQUERY_DATASET}.upi_customer c ON t.payer_vpa = c.primary_vpa
+      WHERE c.name = {{current_user}}
+
+    - "my account details" →
+      SELECT * FROM {config.BIGQUERY_DATASET}.upi_customer
+      WHERE name = {{current_user}}
+
+    **Query Patterns with Security for MERCHANTS**:
+    - "my transactions" or "transactions to my store" →
+      SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
+      WHERE t.payee_vpa = {{current_user}}
+
+    - "total sales" or "revenue" →
+      SELECT SUM(amount) as total_sales FROM {config.BIGQUERY_DATASET}.upi_transaction t
+      WHERE t.payee_vpa = {{current_user}} AND t.status = 'SUCCESS'
+
+    - "my merchant details" →
+      SELECT * FROM {config.BIGQUERY_DATASET}.upi_merchant
+      WHERE merchant_vpa = {{current_user}}
+
     Database schema:
     {formatted_schema}
     """),
@@ -414,12 +440,12 @@ summary_prompt = ChatPromptTemplate.from_messages([
 ])
 summary_chain = summary_prompt | llm
 
-def _execute_query(sql_query: str, current_user: Optional[str] = None) -> Tuple[str, pd.DataFrame | None]:
+def _execute_query(sql_query: str, current_user: Optional[str] = None, user_type: str = 'customer') -> Tuple[str, pd.DataFrame | None]:
     """
     Execute SQL query with comprehensive security validation and result limits.
     Implements all 4 layers of security guardrails.
     """
-    
+
     # Layer 1: Query Type Validation
     is_valid_type, error_msg = validate_query_type(sql_query)
     if not is_valid_type:
@@ -431,9 +457,10 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None) -> Tuple[
             reason='Prohibited query type detected'
         )
         return error_msg, None
-    
+
     # Layer 3: SQL Access Validation (Row-Level Security)
-    if current_user:
+    # Only apply customer-specific validation for customers, not merchants
+    if current_user and user_type == 'customer':
         is_valid, error_msg = validate_sql_access(sql_query, current_user)
         if not is_valid:
             print(f"[SECURITY BLOCKED - Access] User: {current_user} | Query: {sql_query[:100]}")
@@ -472,7 +499,8 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None) -> Tuple[
             warning_msg = "\n\n⚠️ Results limited to 1000 rows per security policy."
         
         # Post-execution validation (Double-check security)
-        if current_user and not results.empty:
+        # Only for customers - merchants can see multiple customers' transactions
+        if current_user and user_type == 'customer' and not results.empty:
             if 'customer_name' in results.columns:
                 unauthorized_names = results[results['customer_name'] != current_user]['customer_name'].unique()
                 if len(unauthorized_names) > 0:
@@ -518,35 +546,36 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None) -> Tuple[
             return f"An error occurred while executing the query: {e}", None
 
 @mcp.tool
-def query_customer_database(natural_language_query: str, current_user: str = None) -> str:
+def query_customer_database(natural_language_query: str, current_user: str = None, user_type: str = 'customer') -> str:
     """
     Answers questions about customer data, transactions, accounts, or
     financial calculations from a BigQuery database.
-    
+
     SECURITY: Enforces comprehensive multi-layer security guardrails:
     - Layer 1: Query Parser & Validator (blocks prohibited operations)
     - Layer 2: Database READ-ONLY user permissions
     - Layer 3: Row-Level Security (users can only access their own data)
     - Layer 4: Rate Limiting (10 queries/minute, 100 queries/session)
-    
+
     Additional Safeguards:
     - Max 1000 rows per query
     - 30-second query timeout
     - 1GB maximum bytes billed
     - Comprehensive audit logging
-    
+
     Args:
         natural_language_query: The user's question in natural language
-        current_user: The authenticated user's name (REQUIRED for security)
-    
+        current_user: The authenticated user's name or merchant VPA (REQUIRED for security)
+        user_type: Type of user ('customer' or 'merchant'), defaults to 'customer'
+
     Returns:
         Query results with SQL query included, or security error message
     """
     print(f"\n{'='*60}")
     print(f"[BQ Tool] Query: {natural_language_query}")
-    print(f"[BQ Tool] Authenticated User: {current_user or 'NONE - DENIED'}")
+    print(f"[BQ Tool] Authenticated User: {current_user or 'NONE - DENIED'} ({user_type.upper()})")
     print(f"{'='*60}")
-    
+
     # 1. Authentication check
     if not current_user:
         log_query_attempt(
@@ -568,27 +597,29 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
         )
         return limit_msg
     
-    # 3. Natural language access permission check
-    is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
-    if not is_allowed:
-        print(f"[SECURITY] Blocked at NL level: {natural_language_query}")
-        log_query_attempt(
-            user=current_user,
-            query=natural_language_query,
-            status='BLOCKED',
-            reason='Unauthorized access pattern in natural language query'
-        )
-        return error_msg
-    
+    # 3. Natural language access permission check (only for customers)
+    if user_type == 'customer':
+        is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
+        if not is_allowed:
+            print(f"[SECURITY] Blocked at NL level: {natural_language_query}")
+            log_query_attempt(
+                user=current_user,
+                query=natural_language_query,
+                status='BLOCKED',
+                reason='Unauthorized access pattern in natural language query'
+            )
+            return error_msg
+
     # 4. Generate SQL with user context
     sql_response = sql_generation_chain.invoke({
         "question": natural_language_query,
-        "current_user": f"'{current_user}'"
+        "current_user": f"'{current_user}'",
+        "user_type": user_type
     })
     sql_query = sql_response.content.strip()
-    
+
     print(f"[BQ Tool] Generated SQL: {sql_query[:150]}...")
-    
+
     # 5. Check for access denied in SQL generation
     if "ACCESS_DENIED" in sql_query:
         log_query_attempt(
@@ -601,17 +632,17 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
             f"🚫 Access Denied: You can only query your own data.\n"
             f"   You are authenticated as '{current_user}'."
         )
-    
+
     # 6. Validate SQL query was generated properly
     if "cannot answer" in sql_query.lower():
         return "I'm sorry, but I cannot answer that question with the available database schema."
-    
+
     sql_upper = sql_query.upper().replace("```SQL", "").replace("```", "").strip()
     if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH')):
         return "I encountered an issue generating a SQL query. Please try rephrasing your question."
-    
+
     # 7. Execute SQL with all security validations
-    text_result, df_result = _execute_query(sql_query, current_user)
+    text_result, df_result = _execute_query(sql_query, current_user, user_type)
     
     # 8. Log successful execution
     if df_result is not None:

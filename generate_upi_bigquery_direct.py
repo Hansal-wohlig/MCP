@@ -213,8 +213,8 @@ class UPIBigQueryGenerator:
             'upi_refund'
         ]
 
-        max_retries = 10
-        retry_delay = 2  # seconds
+        max_retries = 15
+        retry_delay = 3  # seconds
 
         for table_name in tables_to_check:
             table_id = f"{self.dataset_id}.{table_name}"
@@ -233,6 +233,10 @@ class UPIBigQueryGenerator:
                         print(f"  ❌ Table {table_name} not ready after {max_retries} attempts: {e}")
                         sys.exit(1)
 
+        # Additional wait for BigQuery backend to fully propagate
+        print(f"  ⏳ Waiting additional 10 seconds for BigQuery backend propagation...")
+        time.sleep(10)
+        print(f"  ✓ Tables should now be fully ready for inserts")
         print("-" * 70 + "\n")
 
     def weighted_choice(self, choices_dict):
@@ -263,19 +267,40 @@ class UPIBigQueryGenerator:
                 'created_at': datetime.now().isoformat()
             })
 
-        # Insert into BigQuery
-        try:
-            errors = self.bq_client.insert_rows_json(table_id, banks_data)
-            if errors:
-                print(f"❌ Errors inserting banks: {errors}")
-                sys.exit(1)
-            else:
-                print(f"✓ Inserted {len(banks_data)} banks")
-                print(f"  Banks: {', '.join(self.banks[:5])}{'...' if len(self.banks) > 5 else ''}")
-                print("-" * 70 + "\n")
-        except Exception as e:
-            print(f"❌ Error inserting banks: {e}")
-            sys.exit(1)
+        # Insert into BigQuery with retry logic
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                print(f"  Attempting insert (try {retry + 1}/{max_retries})...")
+                errors = self.bq_client.insert_rows_json(table_id, banks_data)
+                if errors:
+                    print(f"⚠️  Errors inserting banks: {errors}")
+                    if retry < max_retries - 1:
+                        print(f"  Retrying in 5 seconds...")
+                        time.sleep(5)
+                        continue
+                    else:
+                        print(f"❌ Failed after {max_retries} attempts")
+                        sys.exit(1)
+                else:
+                    print(f"✓ Inserted {len(banks_data)} banks")
+                    print(f"  Banks: {', '.join(self.banks[:5])}{'...' if len(self.banks) > 5 else ''}")
+                    print("-" * 70 + "\n")
+                    break
+            except Exception as e:
+                print(f"⚠️  Error on attempt {retry + 1}: {e}")
+                if retry < max_retries - 1:
+                    print(f"  Waiting 10 seconds before retry...")
+                    time.sleep(10)
+                else:
+                    print(f"❌ Error inserting banks after {max_retries} attempts: {e}")
+                    print(f"\n🔍 Debug Info:")
+                    print(f"   Table ID: {table_id}")
+                    print(f"   Dataset: {self.dataset_id}")
+                    print(f"   Project: {config.GCP_PROJECT_ID}")
+                    print(f"\n💡 Suggestion: Wait a few minutes and try again.")
+                    print(f"   BigQuery tables may need more time to propagate.")
+                    sys.exit(1)
 
     def generate_customers(self):
         """Generate customer records in batches and insert into BigQuery"""
@@ -395,7 +420,8 @@ class UPIBigQueryGenerator:
         print("-" * 70 + "\n")
 
     def generate_merchants(self):
-        """Generate merchant records and insert into BigQuery"""
+        """Generate merchant records and insert into BigQuery
+        First creates authentication merchants with fixed VPAs, then generates random merchants"""
         print("🏪 GENERATING MERCHANT DATA")
         print("-" * 70)
 
@@ -404,55 +430,127 @@ class UPIBigQueryGenerator:
         batch_size = min(self.DATA_CONFIG['batch_size'], num_merchants)
         total_inserted = 0
 
-        for batch_start in range(0, num_merchants, batch_size):
-            batch_end = min(batch_start + batch_size, num_merchants)
-            batch_count = batch_end - batch_start
+        # Define authentication merchants with fixed VPAs (must match auth.py)
+        AUTH_MERCHANTS = [
+            {
+                'vpa': 'merchant0@sbin',
+                'name': 'Grocery Store',
+                'category': 'Grocery',
+                'bank_code': 'SBIN'
+            },
+            {
+                'vpa': 'merchant1@hdfc',
+                'name': 'Electronics Store',
+                'category': 'Electronics',
+                'bank_code': 'HDFC'
+            },
+            {
+                'vpa': 'merchant2@icic',
+                'name': 'Fashion Store',
+                'category': 'Fashion',
+                'bank_code': 'ICIC'
+            },
+            {
+                'vpa': 'merchant3@axis',
+                'name': 'Food Store',
+                'category': 'Food & Dining',
+                'bank_code': 'AXIS'
+            },
+            {
+                'vpa': 'merchant4@punb',
+                'name': 'Healthcare Store',
+                'category': 'Healthcare',
+                'bank_code': 'PUNB'
+            }
+        ]
 
-            merchants_data = []
-            for i in range(batch_count):
-                merchant_id = str(uuid.uuid4())
-                self.merchant_ids.append(merchant_id)
+        all_merchants_data = []
 
-                category = random.choice(self.MERCHANT_CATEGORIES)
-                merchant_name = f"{category} Store {random.randint(1, 9999)}"
-                merchant_vpa = f"merchant{batch_start + i}@{random.choice(self.banks).lower()}"
-                self.merchant_vpas.append(merchant_vpa)
+        # Phase 1: Create authentication merchants first
+        print(f"  Phase 1: Creating {len(AUTH_MERCHANTS)} authentication merchants...")
+        for auth_merchant in AUTH_MERCHANTS:
+            merchant_id = str(uuid.uuid4())
+            self.merchant_ids.append(merchant_id)
+            self.merchant_vpas.append(auth_merchant['vpa'])
 
-                # Settlement account
-                settlement_account = f"{random.randint(10000000000, 99999999999)}"
-                bank_code = random.choice(self.banks)
-                ifsc = f"{bank_code}0{random.randint(100000, 999999)}"
+            # Settlement account
+            settlement_account = f"{random.randint(10000000000, 99999999999)}"
+            ifsc = f"{auth_merchant['bank_code']}0{random.randint(100000, 999999)}"
 
-                merchants_data.append({
-                    'merchant_id': merchant_id,
-                    'merchant_name': merchant_name,
-                    'merchant_vpa': merchant_vpa,
-                    'category': category,
-                    'settlement_account_no': settlement_account,
-                    'ifsc_code': ifsc,
-                    'created_at': datetime.now().isoformat()
-                })
+            merchant_data = {
+                'merchant_id': merchant_id,
+                'merchant_name': auth_merchant['name'],
+                'merchant_vpa': auth_merchant['vpa'],
+                'category': auth_merchant['category'],
+                'settlement_account_no': settlement_account,
+                'ifsc_code': ifsc,
+                'created_at': datetime.now().isoformat()
+            }
+
+            all_merchants_data.append(merchant_data)
+            print(f"    ✓ Created: {auth_merchant['name']} ({auth_merchant['vpa']})")
+
+        # Phase 2: Generate remaining random merchants
+        remaining_merchants = num_merchants - len(AUTH_MERCHANTS)
+        print(f"\n  Phase 2: Generating {remaining_merchants:,} random merchants...")
+
+        for i in range(remaining_merchants):
+            merchant_id = str(uuid.uuid4())
+            self.merchant_ids.append(merchant_id)
+
+            category = random.choice(self.MERCHANT_CATEGORIES)
+            merchant_name = f"{category} Store {random.randint(1, 9999)}"
+            # Start numbering from 5 onwards (after auth merchants 0-4)
+            merchant_vpa = f"merchant{len(AUTH_MERCHANTS) + i}@{random.choice(self.banks).lower()}"
+            self.merchant_vpas.append(merchant_vpa)
+
+            # Settlement account
+            settlement_account = f"{random.randint(10000000000, 99999999999)}"
+            bank_code = random.choice(self.banks)
+            ifsc = f"{bank_code}0{random.randint(100000, 999999)}"
+
+            merchant_data = {
+                'merchant_id': merchant_id,
+                'merchant_name': merchant_name,
+                'merchant_vpa': merchant_vpa,
+                'category': category,
+                'settlement_account_no': settlement_account,
+                'ifsc_code': ifsc,
+                'created_at': datetime.now().isoformat()
+            }
+
+            all_merchants_data.append(merchant_data)
+
+        print(f"  ✓ Total merchants prepared: {len(all_merchants_data):,}")
+
+        # Phase 3: Insert all merchants in batches
+        print(f"\n  Phase 3: Inserting merchants into BigQuery...")
+        for batch_start in range(0, len(all_merchants_data), batch_size):
+            batch_end = min(batch_start + batch_size, len(all_merchants_data))
+            batch = all_merchants_data[batch_start:batch_end]
 
             # Insert batch
             try:
-                errors = self.bq_client.insert_rows_json(table_id, merchants_data)
+                errors = self.bq_client.insert_rows_json(table_id, batch)
                 if errors:
                     print(f"  ⚠️  Some errors in batch {batch_start // batch_size + 1}: {len(errors)} errors")
 
-                total_inserted += batch_count
-                progress = (total_inserted / num_merchants) * 100
-                print(f"  ✓ Batch {batch_start // batch_size + 1}: {batch_count:,} merchants | "
-                      f"Total: {total_inserted:,}/{num_merchants:,} ({progress:.1f}%)")
+                total_inserted += len(batch)
+                progress = (total_inserted / len(all_merchants_data)) * 100
+                print(f"  ✓ Batch {batch_start // batch_size + 1}: {len(batch):,} merchants | "
+                      f"Total: {total_inserted:,}/{len(all_merchants_data):,} ({progress:.1f}%)")
 
             except Exception as e:
                 print(f"❌ Error inserting merchants batch {batch_start}: {e}")
                 continue
 
         print(f"✓ Total merchants inserted: {total_inserted:,}")
+        print(f"  ℹ️  Authentication merchants (merchant0-merchant4) created with fixed VPAs")
         print("-" * 70 + "\n")
 
     def generate_transactions(self):
-        """Generate transaction records in batches and insert into BigQuery"""
+        """Generate transaction records in batches and insert into BigQuery
+        Ensures every customer has at least 2 transactions"""
         print("💳 GENERATING TRANSACTION DATA")
         print("-" * 70)
 
@@ -465,20 +563,29 @@ class UPIBigQueryGenerator:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=365)
 
-        for batch_start in range(0, num_transactions, batch_size):
-            batch_end = min(batch_start + batch_size, num_transactions)
-            batch_count = batch_end - batch_start
+        # Calculate transactions per customer
+        num_customers = len(self.customer_vpas)
+        min_txns_per_customer = 2  # Each customer gets at least 2 transactions
+        guaranteed_txns = num_customers * min_txns_per_customer
 
-            transactions_data = []
-            for i in range(batch_count):
+        print(f"  ℹ️  Ensuring each of {num_customers:,} customers has at least {min_txns_per_customer} transactions")
+        print(f"  ℹ️  Guaranteed transactions: {guaranteed_txns:,}")
+        print(f"  ℹ️  Random transactions: {num_transactions - guaranteed_txns:,}")
+
+        all_transactions_data = []
+
+        # Phase 1: Ensure each customer has at least min_txns_per_customer transactions
+        print(f"\n  Phase 1: Generating guaranteed transactions for all customers...")
+        for customer_vpa in self.customer_vpas:
+            for txn_num in range(min_txns_per_customer):
                 transaction_id = str(uuid.uuid4())
                 self.transaction_ids.append(transaction_id)
 
                 # Generate UPI transaction reference
                 upi_txn_ref = f"UPI{random.randint(100000000000, 999999999999)}"
 
-                # Select random payer and payee
-                payer_vpa = random.choice(self.customer_vpas)
+                # This customer is the payer
+                payer_vpa = customer_vpa
 
                 # Determine if this is a merchant transaction
                 is_merchant_txn = random.random() < (self.DATA_CONFIG['merchant_transaction_percentage'] / 100)
@@ -540,24 +647,114 @@ class UPIBigQueryGenerator:
                     'remarks': remarks
                 }
 
-                transactions_data.append(txn_data)
+                all_transactions_data.append(txn_data)
+
+        print(f"  ✓ Generated {len(all_transactions_data):,} guaranteed transactions")
+
+        # Phase 2: Generate remaining random transactions
+        remaining_txns = num_transactions - len(all_transactions_data)
+        print(f"\n  Phase 2: Generating {remaining_txns:,} random transactions...")
+
+        for i in range(remaining_txns):
+            transaction_id = str(uuid.uuid4())
+            self.transaction_ids.append(transaction_id)
+
+            # Generate UPI transaction reference
+            upi_txn_ref = f"UPI{random.randint(100000000000, 999999999999)}"
+
+            # Select random payer and payee
+            payer_vpa = random.choice(self.customer_vpas)
+
+            # Determine if this is a merchant transaction
+            is_merchant_txn = random.random() < (self.DATA_CONFIG['merchant_transaction_percentage'] / 100)
+
+            if is_merchant_txn and self.merchant_vpas:
+                payee_vpa = random.choice(self.merchant_vpas)
+                merchant_id = random.choice(self.merchant_ids)
+            else:
+                payee_vpa = random.choice(self.customer_vpas)
+                # Ensure different from payer
+                while payee_vpa == payer_vpa and len(self.customer_vpas) > 1:
+                    payee_vpa = random.choice(self.customer_vpas)
+                merchant_id = None
+
+            # Banks
+            payer_bank = random.choice(self.banks)
+            payee_bank = random.choice(self.banks)
+
+            # Amount: Random between 10 and 50,000
+            amount = round(random.uniform(10, 50000), 2)
+
+            # Transaction type and status
+            txn_type = self.weighted_choice(self.DATA_CONFIG['transaction_type_distribution'])
+            status = self.weighted_choice(self.DATA_CONFIG['transaction_status_distribution'])
+
+            # Timestamps
+            initiated_at = start_date + timedelta(
+                seconds=random.randint(0, int((end_date - start_date).total_seconds()))
+            )
+
+            if status in ['SUCCESS', 'FAILED', 'REVERSED']:
+                completed_at = initiated_at + timedelta(seconds=random.randint(1, 300))
+            else:
+                completed_at = None
+
+            # Failure reason
+            failure_reason = None
+            if status in ['FAILED', 'REVERSED']:
+                failure_reason = random.choice(self.FAILURE_REASONS)
+
+            # Remarks
+            remarks = f"{txn_type} transaction" if random.random() > 0.7 else None
+
+            txn_data = {
+                'transaction_id': transaction_id,
+                'upi_txn_ref': upi_txn_ref,
+                'payer_vpa': payer_vpa,
+                'payee_vpa': payee_vpa,
+                'payer_bank_code': payer_bank,
+                'payee_bank_code': payee_bank,
+                'amount': amount,
+                'currency': 'INR',
+                'transaction_type': txn_type,
+                'status': status,
+                'initiated_at': initiated_at.isoformat(),
+                'completed_at': completed_at.isoformat() if completed_at else None,
+                'failure_reason': failure_reason,
+                'merchant_id': merchant_id,
+                'remarks': remarks
+            }
+
+            all_transactions_data.append(txn_data)
+
+        print(f"  ✓ Total transactions generated: {len(all_transactions_data):,}")
+
+        # Shuffle to randomize order
+        random.shuffle(all_transactions_data)
+
+        # Phase 3: Insert all transactions in batches
+        print(f"\n  Phase 3: Inserting transactions into BigQuery...")
+        for batch_start in range(0, len(all_transactions_data), batch_size):
+            batch_end = min(batch_start + batch_size, len(all_transactions_data))
+            batch = all_transactions_data[batch_start:batch_end]
 
             # Insert batch into BigQuery
             try:
-                errors = self.bq_client.insert_rows_json(table_id, transactions_data)
+                errors = self.bq_client.insert_rows_json(table_id, batch)
                 if errors:
                     print(f"  ⚠️  Some errors in batch {batch_start // batch_size + 1}: {len(errors)} errors")
 
-                total_inserted += batch_count
-                progress = (total_inserted / num_transactions) * 100
-                print(f"  ✓ Batch {batch_start // batch_size + 1}: {batch_count:,} transactions | "
-                      f"Total: {total_inserted:,}/{num_transactions:,} ({progress:.1f}%)")
+                total_inserted += len(batch)
+                progress = (total_inserted / len(all_transactions_data)) * 100
+                print(f"  ✓ Batch {batch_start // batch_size + 1}: {len(batch):,} transactions | "
+                      f"Total: {total_inserted:,}/{len(all_transactions_data):,} ({progress:.1f}%)")
 
             except Exception as e:
                 print(f"❌ Error inserting transactions batch {batch_start}: {e}")
                 continue
 
         print(f"✓ Total transactions inserted: {total_inserted:,}")
+        print(f"  ℹ️  Each customer has at least {min_txns_per_customer} transactions")
         print("-" * 70 + "\n")
 
     def generate_audit_records(self):

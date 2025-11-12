@@ -96,43 +96,43 @@ def main():
     tables_config = [
         {
             'name': 'upi_bank',
-            'output': 'data1/upi_banks.csv',
+            'output': 'data2/upi_banks.csv',
             'order_by': 'bank_code',
             'description': 'Bank master data'
         },
         {
             'name': 'upi_customer',
-            'output': 'data1/upi_customers.csv',
+            'output': 'data2/upi_customers.csv',
             'order_by': 'created_at',
             'description': 'Customer information'
         },
         {
             'name': 'upi_customer_credentials',
-            'output': 'data1/upi_customer_credentials.csv',
+            'output': 'data2/upi_customer_credentials.csv',
             'order_by': 'customer_id',
             'description': 'Customer authentication credentials'
         },
         {
             'name': 'upi_merchant',
-            'output': 'data1/upi_merchants.csv',
+            'output': 'data2/upi_merchants.csv',
             'order_by': 'created_at',
             'description': 'Merchant information'
         },
         {
             'name': 'upi_transaction',
-            'output': 'data1/upi_transactions.csv',
+            'output': 'data2/upi_transactions.csv',
             'order_by': 'initiated_at',
             'description': 'UPI transaction records'
         },
         {
             'name': 'upi_transaction_audit',
-            'output': 'data1/upi_transaction_audit.csv',
+            'output': 'data2/upi_transaction_audit.csv',
             'order_by': 'change_timestamp',
             'description': 'Transaction audit trail'
         },
         {
             'name': 'upi_refund',
-            'output': 'data1/upi_refunds.csv',
+            'output': 'data2/upi_refunds.csv',
             'order_by': 'processed_at',
             'description': 'Refund transactions'
         }

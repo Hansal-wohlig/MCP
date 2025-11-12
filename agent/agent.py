@@ -10,17 +10,29 @@ from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
 from customer_auth import CustomerAuthenticator
 
-# --- Authenticate customer at startup ---
+# --- Authenticate user at startup (customer or merchant) ---
 authenticator = CustomerAuthenticator()
-customer = authenticator.get_authenticated_customer()
+user_data, user_type = authenticator.get_authenticated_user()
 
-if not customer:
+if not user_data or not user_type:
     print("\n❌ Exiting due to authentication failure.")
     exit(1)
 
-CURRENT_USER = customer['name']
-CURRENT_USER_VPA = customer['primary_vpa']
-CUSTOMER_ID = customer['customer_id']
+# Set user variables based on user type
+if user_type == 'customer':
+    CURRENT_USER = user_data['name']
+    CURRENT_USER_VPA = user_data['primary_vpa']
+    CUSTOMER_ID = user_data.get('customer_id')
+    USER_TYPE = 'customer'
+elif user_type == 'merchant':
+    CURRENT_USER = user_data['merchant_vpa']  # For merchants, use VPA as identifier
+    CURRENT_USER_VPA = user_data['merchant_vpa']
+    MERCHANT_ID = user_data.get('merchant_id')
+    MERCHANT_NAME = user_data.get('merchant_name')
+    USER_TYPE = 'merchant'
+else:
+    print(f"\n❌ Unknown user type: {user_type}")
+    exit(1)
 
 # --- Verify GCP Configuration ---
 if not hasattr(config, 'GCP_PROJECT_ID') or not config.GCP_PROJECT_ID:
@@ -45,6 +57,29 @@ mcp_tools = MCPToolset(
     )
 )
 
+# --- Build user-specific instruction based on user type ---
+if USER_TYPE == 'customer':
+    user_intro = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔐 AUTHENTICATED CUSTOMER: {CURRENT_USER}\n"
+        f"📱 VPA: {CURRENT_USER_VPA}\n"
+        f"🔒 SECURITY LEVEL: MAXIMUM (Banking Grade)\n"
+        f"🛡️ ACCESS SCOPE: Your Personal Data Only\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    user_context = f"Customer can ONLY access their own data:\n   → Politely explain: 'For security reasons, you can only access your own banking data. You are logged in as {CURRENT_USER} ({CURRENT_USER_VPA}).'"
+elif USER_TYPE == 'merchant':
+    user_intro = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔐 AUTHENTICATED MERCHANT: {MERCHANT_NAME}\n"
+        f"📱 VPA: {CURRENT_USER_VPA}\n"
+        f"🏪 MERCHANT ID: {MERCHANT_ID}\n"
+        f"🔒 SECURITY LEVEL: MAXIMUM (Banking Grade)\n"
+        f"🛡️ ACCESS SCOPE: All Transactions to Your Store\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    user_context = f"Merchant can access ALL transactions to their store:\n   → You are logged in as {MERCHANT_NAME} ({CURRENT_USER_VPA}). You can view all incoming payments to your store."
+
 # --- Define the Main Agent with Vertex AI ---
 root_agent = Agent(
     name="secure_banking_agent",
@@ -56,12 +91,7 @@ root_agent = Agent(
     instruction=(
         f"You are a friendly and secure banking assistant with access to two specialized tools:\n"
         f"\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔐 AUTHENTICATED CUSTOMER: {CURRENT_USER}\n"
-        f"📱 VPA: {CURRENT_USER_VPA}\n"
-        f"🔒 SECURITY LEVEL: MAXIMUM (Banking Grade)\n"
-        f"🛡️ ACCESS SCOPE: Your Personal Data Only\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{user_intro}"
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
         f"AVAILABLE TOOLS\n"
@@ -84,11 +114,12 @@ root_agent = Agent(
         f"\n"
         f"When calling query_customer_database, you MUST follow these rules:\n"
         f"\n"
-        f"1. ✓ ALWAYS pass both required parameters:\n"
+        f"1. ✓ ALWAYS pass THREE required parameters:\n"
         f"   \n"
         f"   query_customer_database(\n"
         f"       natural_language_query='[user question with context]',\n"
-        f"       current_user='{CURRENT_USER}'\n"
+        f"       current_user='{CURRENT_USER}',\n"
+        f"       user_type='{USER_TYPE}'\n"
         f"   )\n"
         f"\n"
         f"2. ✓ Convert user pronouns to explicit user name:\n"
@@ -102,18 +133,18 @@ root_agent = Agent(
         f"   User says: 'how much did I spend?'\n"
         f"   You call with: 'total spending for {CURRENT_USER}'\n"
         f"\n"
-        f"3. ✓ NEVER omit the current_user parameter:\n"
+        f"3. ✓ NEVER omit the current_user or user_type parameters:\n"
         f"   \n"
         f"   ✗ WRONG: query_customer_database('show transactions')\n"
-        f"   ✓ RIGHT: query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}')\n"
+        f"   ✓ RIGHT: query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
         f"\n"
         f"4. ✓ Maintain context in follow-up queries:\n"
         f"   \n"
         f"   First query: 'show my transactions'\n"
-        f"   → query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}')\n"
+        f"   → query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
         f"   \n"
         f"   Follow-up: 'what's the average?'\n"
-        f"   → query_customer_database('average transaction amount for {CURRENT_USER}', current_user='{CURRENT_USER}')\n"
+        f"   → query_customer_database('average transaction amount for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
         f"\n"
         f"5. ✓ Make queries self-contained:\n"
         f"   \n"
@@ -177,14 +208,12 @@ root_agent = Agent(
         f"\n"
         f"1. 🚫 Unauthorized Access Attempts:\n"
         f"   \n"
-        f"   Customer can ONLY access their own data:\n"
-        f"   → Politely explain: 'For security reasons, you can only access your own banking data. You are logged in as {CURRENT_USER} ({CURRENT_USER_VPA}).'\n"
+        f"   {user_context}\n"
         f"   \n"
-        f"   Examples of requests to DENY:\n"
+        f"   Examples of requests to DENY (for customers):\n"
         f"   • 'Show all customers' → DENY\n"
         f"   • 'What are other people's transactions?' → DENY\n"
         f"   • 'List all users' → DENY\n"
-        f"   • Any request for data not belonging to {CURRENT_USER_VPA} → DENY\n"
         f"\n"
         f"2. 🛡️ READ-ONLY Access:\n"
         f"   \n"
@@ -247,21 +276,24 @@ root_agent = Agent(
         f"User: 'Show my recent transactions'\n"
         f"You: query_customer_database(\n"
         f"    natural_language_query='show recent transactions for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}'\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
         f")\n"
         f"\n"
         f"Example 2 - Aggregate Query:\n"
-        f"User: 'What is my total spending this month?'\n"
+        f"User: 'What is my total spending/sales this month?'\n"
         f"You: query_customer_database(\n"
-        f"    natural_language_query='total spending this month for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}'\n"
+        f"    natural_language_query='total spending/sales this month for {CURRENT_USER}',\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
         f")\n"
         f"\n"
         f"Example 3 - Account Information:\n"
         f"User: 'What is my account balance?'\n"
         f"You: query_customer_database(\n"
         f"    natural_language_query='account balance for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}'\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
         f")\n"
         f"\n"
         f"Example 4 - Follow-up Query:\n"
@@ -270,14 +302,16 @@ root_agent = Agent(
         f"User: 'What's the average amount?'\n"
         f"You: query_customer_database(\n"
         f"    natural_language_query='average transaction amount for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}'\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
         f")\n"
         f"\n"
         f"Example 5 - Time-based Query:\n"
-        f"User: 'How much did I spend last month?'\n"
+        f"User: 'How much did I spend/earn last month?'\n"
         f"You: query_customer_database(\n"
-        f"    natural_language_query='total spending last month for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}'\n"
+        f"    natural_language_query='total spending/sales last month for {CURRENT_USER}',\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
         f")\n"
         f"\n"
         f"Example 6 - UPI Question:\n"
@@ -317,10 +351,11 @@ root_agent = Agent(
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
         f"REMEMBER: Security is paramount. When in doubt, always:\n"
-        f"1. Include the current_user parameter\n"
-        f"2. Make queries explicit with the user's name\n"
+        f"1. Include BOTH current_user AND user_type parameters\n"
+        f"2. Make queries explicit with the user's name/VPA\n"
         f"3. Show both data and SQL query for transparency\n"
         f"4. Protect user privacy and data integrity\n"
+        f"5. Current user: {CURRENT_USER} | Type: {USER_TYPE}\n"
         f"═══════════════════════════════════════════════════════════════════\n"
     ),
     tools=[
@@ -333,27 +368,51 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"✓ Secure Banking Assistant Ready")
     print("=" * 60)
-    print(f"👤 Customer: {CURRENT_USER}")
-    print(f"📱 VPA: {CURRENT_USER_VPA}")
-    print(f"🆔 Customer ID: {CUSTOMER_ID}")
+
+    if USER_TYPE == 'customer':
+        print(f"👤 Customer: {CURRENT_USER}")
+        print(f"📱 VPA: {CURRENT_USER_VPA}")
+        print(f"🆔 Customer ID: {CUSTOMER_ID}")
+        print(f"🛡️ Access Scope: Your Personal Data Only")
+    elif USER_TYPE == 'merchant':
+        print(f"🏪 Merchant: {MERCHANT_NAME}")
+        print(f"📱 VPA: {CURRENT_USER_VPA}")
+        print(f"🆔 Merchant ID: {MERCHANT_ID}")
+        print(f"🛡️ Access Scope: All Transactions to Your Store")
+
     print(f"🔒 Security Level: Banking Grade (Multi-Layer)")
-    print(f"🛡️ Access Scope: Your Personal Data Only")
     print(f"🌐 AI Platform: Vertex AI ({config.GCP_PROJECT_ID})")
     print(f"🔧 Model: gemini-2.5-flash")
+    print(f"👥 User Type: {USER_TYPE.upper()}")
     print("\n📋 Security Features Active:")
-    print("   ✓ VPA + PIN Authentication")
-    print("   ✓ Query Parser & Validator")
-    print("   ✓ Row-Level Security (Your Data Only)")
+
+    if USER_TYPE == 'customer':
+        print("   ✓ VPA + PIN Authentication")
+        print("   ✓ Query Parser & Validator")
+        print("   ✓ Row-Level Security (Your Data Only)")
+    elif USER_TYPE == 'merchant':
+        print("   ✓ VPA + Password Authentication")
+        print("   ✓ Query Parser & Validator")
+        print("   ✓ Access to Store Transactions")
+
     print("   ✓ Rate Limiting (10/min, 100/session)")
     print("   ✓ READ-ONLY Database Access")
     print("   ✓ Comprehensive Audit Logging")
     print("\n🚫 Prohibited Operations:")
     print("   • DELETE, UPDATE, INSERT")
     print("   • Schema modifications")
-    print("   • Access to other customers' data")
-    print("\n✅ Allowed Operations:")
-    print("   • Query your own transactions")
-    print("   • View your account details")
+
+    if USER_TYPE == 'customer':
+        print("   • Access to other customers' data")
+        print("\n✅ Allowed Operations:")
+        print("   • Query your own transactions")
+        print("   • View your account details")
+    elif USER_TYPE == 'merchant':
+        print("   • Access to customer personal information")
+        print("\n✅ Allowed Operations:")
+        print("   • Query all transactions to your store")
+        print("   • View sales statistics and analytics")
+
     print("   • Ask UPI-related questions")
     print("=" * 60)
     print("\nType 'quit', 'exit', or 'q' to stop.")
