@@ -14,6 +14,7 @@ PASSWORD_TO_USER = {
     hashlib.sha256("vikram123".encode()).hexdigest(): "Vikram Singh",
 }
 
+
 def authenticate_user_by_password(password: str) -> Optional[str]:
     """
     Authenticate user by password only.
