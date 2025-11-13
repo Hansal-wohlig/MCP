@@ -1,14 +1,125 @@
-import config
 import os
 import sys
-# Add parent directory to path to import customer_auth
+import time
+import json
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional
+from collections import defaultdict
+from dataclasses import dataclass, asdict
+
+# Add parent directory to path to import customer_auth and config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import config
 
 from google.adk.agents import Agent
 from google.adk.models import Gemini
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseServerParams
 from customer_auth import CustomerAuthenticator
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai.types import Content, Part
+
+# --- Performance Metrics Classes ---
+perf_logger = logging.getLogger('agent_performance')
+perf_logger.setLevel(logging.INFO)
+
+perf_handler = logging.FileHandler('agent_performance.log')
+perf_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(message)s'
+))
+perf_logger.addHandler(perf_handler)
+
+@dataclass
+class PerformanceMetrics:
+    """Store performance metrics for a single request"""
+    timestamp: str
+    user: str
+    user_type: str
+    query: str
+
+    # Timing metrics (in seconds)
+    total_time: float = 0.0
+    agent_response_time: Optional[float] = None
+
+    # Status
+    status: str = "SUCCESS"
+    error_message: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for logging"""
+        return asdict(self)
+    
+    def to_json(self) -> str:
+        """Convert to JSON string"""
+        return json.dumps(self.to_dict(), indent=2)
+
+class PerformanceTracker:
+    """Track and aggregate performance metrics"""
+    
+    def __init__(self):
+        self.metrics_history = []
+        self.session_stats = defaultdict(lambda: {
+            'total_queries': 0,
+            'total_time': 0.0,
+            'avg_time': 0.0,
+            'errors': 0
+        })
+    
+    def log_metric(self, metric: PerformanceMetrics):
+        """Log a performance metric"""
+        self.metrics_history.append(metric)
+        
+        # Update session stats
+        user_stats = self.session_stats[metric.user]
+        user_stats['total_queries'] += 1
+        user_stats['total_time'] += metric.total_time
+        user_stats['avg_time'] = user_stats['total_time'] / user_stats['total_queries']
+        
+        if metric.status == "ERROR":
+            user_stats['errors'] += 1
+        
+        # Log to file
+        perf_logger.info(metric.to_json())
+    
+    def get_session_summary(self, user: str) -> Dict[str, Any]:
+        """Get summary statistics for a user session"""
+        stats = self.session_stats[user]
+        
+        # Calculate additional metrics from history
+        user_metrics = [m for m in self.metrics_history if m.user == user]
+        
+        if user_metrics:
+            stats['min_response_time'] = min(m.total_time for m in user_metrics)
+            stats['max_response_time'] = max(m.total_time for m in user_metrics)
+        
+        return stats
+    
+    def print_summary(self, user: str):
+        """Print formatted session summary"""
+        stats = self.get_session_summary(user)
+        
+        print("\n" + "="*60)
+        print("📊 SESSION PERFORMANCE SUMMARY")
+        print("="*60)
+        print(f"User: {user}")
+        print(f"\n📈 Query Statistics:")
+        print(f"   • Total Queries: {stats['total_queries']}")
+        print(f"   • Errors: {stats['errors']}")
+        
+        print(f"\n⏱️  Response Times:")
+        print(f"   • Average: {stats['avg_time']:.3f}s")
+        if 'min_response_time' in stats:
+            print(f"   • Fastest: {stats['min_response_time']:.3f}s")
+            print(f"   • Slowest: {stats['max_response_time']:.3f}s")
+        
+        print(f"\n⏰ Total Session Time: {stats['total_time']:.3f}s")
+        print("="*60)
+
+# Global performance tracker instance
+performance_tracker = PerformanceTracker()
 
 # --- Authenticate user at startup (customer or merchant) ---
 authenticator = CustomerAuthenticator()
@@ -81,7 +192,7 @@ elif USER_TYPE == 'merchant':
     user_context = f"Merchant can access ALL transactions to their store:\n   → You are logged in as {MERCHANT_NAME} ({CURRENT_USER_VPA}). You can view all incoming payments to your store."
 
 # --- Define the Main Agent with Vertex AI ---
-root_agent = Agent(
+agent = Agent(
     name="secure_banking_agent",
     model=Gemini(
         model_name="gemini-2.5-flash",
@@ -269,87 +380,6 @@ root_agent = Agent(
         f"   • Don't invent or estimate values\n"
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
-        f"TOOL USAGE EXAMPLES\n"
-        f"═══════════════════════════════════════════════════════════════════\n"
-        f"\n"
-        f"Example 1 - Basic Query:\n"
-        f"User: 'Show my recent transactions'\n"
-        f"You: query_customer_database(\n"
-        f"    natural_language_query='show recent transactions for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}',\n"
-        f"    user_type='{USER_TYPE}'\n"
-        f")\n"
-        f"\n"
-        f"Example 2 - Aggregate Query:\n"
-        f"User: 'What is my total spending/sales this month?'\n"
-        f"You: query_customer_database(\n"
-        f"    natural_language_query='total spending/sales this month for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}',\n"
-        f"    user_type='{USER_TYPE}'\n"
-        f")\n"
-        f"\n"
-        f"Example 3 - Account Information:\n"
-        f"User: 'What is my account balance?'\n"
-        f"You: query_customer_database(\n"
-        f"    natural_language_query='account balance for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}',\n"
-        f"    user_type='{USER_TYPE}'\n"
-        f")\n"
-        f"\n"
-        f"Example 4 - Follow-up Query:\n"
-        f"User: 'Show my transactions'\n"
-        f"You: [execute query with results]\n"
-        f"User: 'What's the average amount?'\n"
-        f"You: query_customer_database(\n"
-        f"    natural_language_query='average transaction amount for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}',\n"
-        f"    user_type='{USER_TYPE}'\n"
-        f")\n"
-        f"\n"
-        f"Example 5 - Time-based Query:\n"
-        f"User: 'How much did I spend/earn last month?'\n"
-        f"You: query_customer_database(\n"
-        f"    natural_language_query='total spending/sales last month for {CURRENT_USER}',\n"
-        f"    current_user='{CURRENT_USER}',\n"
-        f"    user_type='{USER_TYPE}'\n"
-        f")\n"
-        f"\n"
-        f"Example 6 - UPI Question:\n"
-        f"User: 'How does UPI work?'\n"
-        f"You: ask_upi_document(\n"
-        f"    question='How does UPI work?'\n"
-        f")\n"
-        f"\n"
-        f"Example 7 - Combined Interaction:\n"
-        f"User: 'Show my UPI transactions and explain UPI limits'\n"
-        f"You: \n"
-        f"1. First call query_customer_database for UPI transactions\n"
-        f"2. Then call ask_upi_document for UPI limits\n"
-        f"3. Present both results in an organized response\n"
-        f"\n"
-        f"═══════════════════════════════════════════════════════════════════\n"
-        f"ERROR HANDLING\n"
-        f"═══════════════════════════════════════════════════════════════════\n"
-        f"\n"
-        f"If you receive error messages from tools:\n"
-        f"\n"
-        f"1. 🚫 Security Violation:\n"
-        f"   → Explain the security policy to the user\n"
-        f"   → Suggest alternative queries that are allowed\n"
-        f"\n"
-        f"2. ⏱️ Timeout Error:\n"
-        f"   → Suggest the user add more specific filters\n"
-        f"   → Recommend narrowing the date range or criteria\n"
-        f"\n"
-        f"3. 💾 Data Too Large:\n"
-        f"   → Explain the 1000-row limit\n"
-        f"   → Suggest pagination or more specific filters\n"
-        f"\n"
-        f"4. ⚠️ Rate Limit:\n"
-        f"   → Acknowledge the limit\n"
-        f"   → Suggest waiting or optimizing queries\n"
-        f"\n"
-        f"═══════════════════════════════════════════════════════════════════\n"
         f"REMEMBER: Security is paramount. When in doubt, always:\n"
         f"1. Include BOTH current_user AND user_type parameters\n"
         f"2. Make queries explicit with the user's name/VPA\n"
@@ -362,6 +392,17 @@ root_agent = Agent(
         mcp_tools
     ]
 )
+
+# --- Create Runner ---
+session_service = InMemorySessionService()
+runner = Runner(
+    agent=agent,
+    session_service=session_service
+)
+
+# Generate a session ID for this user
+import uuid
+USER_SESSION_ID = str(uuid.uuid4())
 
 # --- Main execution block ---
 if __name__ == "__main__":
@@ -414,26 +455,41 @@ if __name__ == "__main__":
         print("   • View sales statistics and analytics")
 
     print("   • Ask UPI-related questions")
+    
+    print("\n📊 Performance Monitoring: ENABLED")
+    print("   • Metrics logged to: agent_performance.log")
+    print("   • Real-time timing displayed per query")
+    
     print("=" * 60)
     print("\nType 'quit', 'exit', or 'q' to stop.")
     print("All queries are logged for security and compliance.\n")
     
-    # Interactive loop
+    # Interactive loop with performance tracking
     conversation_count = 0
+    session_start_time = time.time()
+    
     while True:
         try:
             user_input = input("You: ").strip()
             
             # Exit commands
             if user_input.lower() in ['quit', 'exit', 'q']:
+                session_duration = time.time() - session_start_time
+                
                 print("\n" + "=" * 60)
                 print("👋 Thank you for using Secure Banking Assistant")
                 print("=" * 60)
                 print(f"📊 Session Summary:")
                 print(f"   • Total interactions: {conversation_count}")
+                print(f"   • Session duration: {session_duration:.2f}s")
                 print(f"   • User: {CURRENT_USER}")
                 print(f"   • All queries logged for audit purposes")
                 print("=" * 60)
+                
+                # Print detailed performance summary
+                if conversation_count > 0:
+                    performance_tracker.print_summary(CURRENT_USER)
+                
                 print("\n🔒 Your session has been securely closed.\n")
                 break
             
@@ -442,29 +498,101 @@ if __name__ == "__main__":
                 continue
             
             conversation_count += 1
+            query_number = conversation_count
             
-            print("\nAssistant: ", end="", flush=True)
+            print(f"\n{'─'*60}")
+            print(f"Query #{query_number}")
+            print(f"{'─'*60}")
+            print("Assistant: ", end="", flush=True)
+            
+            # Start performance tracking
+            query_start_time = time.time()
+            
+            metric = PerformanceMetrics(
+                timestamp=datetime.now().isoformat(),
+                user=CURRENT_USER,
+                user_type=USER_TYPE,
+                query=user_input[:200]  # Truncate long queries for logging
+            )
             
             # Run the agent with the user's query
             try:
-                response = root_agent.run(user_input)
-                print(response)
-                print()  # Empty line for better readability
+                agent_start = time.time()
+
+                # Helper to collect async generator results
+                async def collect_response():
+                    chunks = []
+                    async for event in runner.run_async(
+                        user_id=CURRENT_USER,
+                        session_id=USER_SESSION_ID,
+                        new_message=Content(parts=[Part(text=user_input)])  # ✅ NEW - CORRECT
+                    ):
+                        # Extract text from events
+                        if hasattr(event, 'content') and hasattr(event.content, 'text'):
+                            chunk_str = event.content.text
+                            chunks.append(chunk_str)
+                            print(chunk_str, end='', flush=True)
+                    print()  # New line after response
+                    return "".join(chunks) if chunks else "(No response)"
+
+                # Run the async function
+                import asyncio
+                response = asyncio.run(collect_response())
+
+                metric.agent_response_time = time.time() - agent_start
+                
+                # Calculate total time
+                metric.total_time = time.time() - query_start_time
+                metric.status = "SUCCESS"
+                
+                # Log the metric
+                performance_tracker.log_metric(metric)
+                
+                # Print performance summary for this query
+                print(f"\n{'─'*60}")
+                print(f"⏱️  Performance Metrics (Query #{query_number}):")
+                print(f"   • Agent Response Time: {metric.agent_response_time:.3f}s")
+                print(f"   • Total Query Time: {metric.total_time:.3f}s")
+                
+                # Get current session stats
+                stats = performance_tracker.get_session_summary(CURRENT_USER)
+                print(f"   • Session Average: {stats['avg_time']:.3f}s")
+                print(f"{'─'*60}\n")
+                
             except Exception as agent_error:
+                metric.total_time = time.time() - query_start_time
+                metric.status = "ERROR"
+                metric.error_message = str(agent_error)[:200]
+                
+                performance_tracker.log_metric(metric)
+                
                 print(f"\n⚠️ I encountered an issue processing your request.")
                 print(f"Error details: {str(agent_error)}")
+                
+                print(f"\n{'─'*60}")
+                print(f"⏱️  Time taken: {metric.total_time:.3f}s (ERROR)")
+                print(f"{'─'*60}")
                 print("Please try rephrasing your question or contact support if the issue persists.\n")
             
         except KeyboardInterrupt:
+            session_duration = time.time() - session_start_time
+            
             print("\n\n" + "=" * 60)
             print("👋 Session interrupted by user")
             print("=" * 60)
             print(f"📊 Session Summary:")
             print(f"   • Total interactions: {conversation_count}")
+            print(f"   • Session duration: {session_duration:.2f}s")
             print(f"   • User: {CURRENT_USER}")
             print("=" * 60)
+            
+            # Print detailed performance summary
+            if conversation_count > 0:
+                performance_tracker.print_summary(CURRENT_USER)
+            
             print("\n🔒 Your session has been securely closed.\n")
             break
+            
         except Exception as e:
             print(f"\n❌ Unexpected Error: {str(e)}")
             print("Please try again or type 'quit' to exit.\n")

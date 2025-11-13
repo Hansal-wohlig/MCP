@@ -4,6 +4,8 @@ import pandas as pd
 import re
 import json
 import logging
+import time
+from datetime import datetime, timedelta
 from google.cloud import bigquery
 from fastmcp import FastMCP
 from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
@@ -11,7 +13,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, Tuple
 from collections import defaultdict
-from datetime import datetime, timedelta
 
 # Import utilities
 from schema_cache_manager import (
@@ -40,6 +41,16 @@ console_handler.setFormatter(logging.Formatter(
 ))
 audit_logger.addHandler(console_handler)
 
+# --- Configure Performance Logging ---
+perf_logger = logging.getLogger('mcp_performance')
+perf_logger.setLevel(logging.INFO)
+
+perf_handler = logging.FileHandler('mcp_performance.log')
+perf_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(message)s'
+))
+perf_logger.addHandler(perf_handler)
+
 def log_query_attempt(
     user: str,
     query: str,
@@ -60,6 +71,51 @@ def log_query_attempt(
     }
     
     audit_logger.info(json.dumps(log_entry))
+
+def log_performance_metric(
+    user: str,
+    user_type: str,
+    query: str,
+    total_time: float,
+    sql_generation_time: float = None,
+    sql_execution_time: float = None,
+    pdf_search_time: float = None,
+    rows_returned: int = None,
+    bytes_processed: int = None,
+    status: str = "SUCCESS"
+):
+    """Log performance metrics for MCP tool calls"""
+    metric = {
+        'timestamp': datetime.now().isoformat(),
+        'user': user,
+        'user_type': user_type,
+        'query': query[:200],  # Truncate long queries
+        'total_time': round(total_time, 3),
+        'sql_generation_time': round(sql_generation_time, 3) if sql_generation_time else None,
+        'sql_execution_time': round(sql_execution_time, 3) if sql_execution_time else None,
+        'pdf_search_time': round(pdf_search_time, 3) if pdf_search_time else None,
+        'rows_returned': rows_returned,
+        'bytes_processed': bytes_processed,
+        'status': status
+    }
+    
+    perf_logger.info(json.dumps(metric))
+    
+    # Print real-time performance summary
+    print(f"\n{'─'*60}")
+    print(f"⏱️  MCP Tool Performance:")
+    if sql_generation_time:
+        print(f"   • SQL Generation: {sql_generation_time:.3f}s")
+    if sql_execution_time:
+        print(f"   • SQL Execution: {sql_execution_time:.3f}s")
+    if pdf_search_time:
+        print(f"   • PDF Search: {pdf_search_time:.3f}s")
+    print(f"   • Total Time: {total_time:.3f}s")
+    if rows_returned is not None:
+        print(f"   • Rows Returned: {rows_returned}")
+    if bytes_processed is not None:
+        print(f"   • Bytes Processed: {bytes_processed:,} ({bytes_processed / 1024 / 1024:.2f} MB)")
+    print(f"{'─'*60}\n")
 
 # --- Rate Limiter (Layer 4) ---
 class RateLimiter:
@@ -219,20 +275,64 @@ def ask_upi_document(question: str) -> str:
     by searching a dedicated PDF document. Use this for questions about
     how UPI works, its features, security, limits, or history.
     """
+    start_time = time.time()
+    
     print(f"[PDF Tool] Received query: {question}")
     
-    docs = vector_store.similarity_search(question, k=3)
-    if not docs:
-        return "I couldn't find any relevant information in the document to answer that question."
+    try:
+        # Track vector search time
+        search_start = time.time()
+        docs = vector_store.similarity_search(question, k=3)
+        search_time = time.time() - search_start
         
-    context = "\n\n".join([f"Context {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
-    
-    response = pdf_generation_chain.invoke({
-        "context": context,
-        "question": question
-    })
-    
-    return response.content
+        if not docs:
+            total_time = time.time() - start_time
+            log_performance_metric(
+                user='SYSTEM',
+                user_type='pdf_query',
+                query=question,
+                total_time=total_time,
+                pdf_search_time=search_time,
+                status='NO_RESULTS'
+            )
+            return "I couldn't find any relevant information in the document to answer that question."
+        
+        context = "\n\n".join([f"Context {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
+        
+        # Track LLM response time
+        llm_start = time.time()
+        response = pdf_generation_chain.invoke({
+            "context": context,
+            "question": question
+        })
+        llm_time = time.time() - llm_start
+        
+        total_time = time.time() - start_time
+        
+        log_performance_metric(
+            user='SYSTEM',
+            user_type='pdf_query',
+            query=question,
+            total_time=total_time,
+            pdf_search_time=search_time + llm_time,
+            rows_returned=len(docs),
+            status='SUCCESS'
+        )
+        
+        print(f"⏱️  PDF Query completed in {total_time:.3f}s (Search: {search_time:.3f}s, LLM: {llm_time:.3f}s)")
+        
+        return response.content
+        
+    except Exception as e:
+        total_time = time.time() - start_time
+        log_performance_metric(
+            user='SYSTEM',
+            user_type='pdf_query',
+            query=question,
+            total_time=total_time,
+            status='ERROR'
+        )
+        raise e
 
 # --- 4. Security Validation Functions ---
 
@@ -314,7 +414,7 @@ def validate_sql_access(sql_query: str, current_user: str) -> Tuple[bool, str]:
     
     sql_upper = sql_query.upper()
 
-    # Check for queries without WHERE clause on restricted tables (both old and new table names)
+    # Check for queries without WHERE clause on restricted tables
     restricted_tables = ["CUSTOMERS", "TRANSACTIONS", "UPI_CUSTOMER", "UPI_TRANSACTION"]
     dataset_prefix = f"{config.BIGQUERY_DATASET.upper()}."
 
@@ -445,7 +545,8 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None, user_type
     Execute SQL query with comprehensive security validation and result limits.
     Implements all 4 layers of security guardrails.
     """
-
+    exec_start_time = time.time()
+    
     # Layer 1: Query Type Validation
     is_valid_type, error_msg = validate_query_type(sql_query)
     if not is_valid_type:
@@ -481,6 +582,9 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None, user_type
         
         print(f"--- Executing SQL for user '{current_user}': ---\n{clean_sql}\n" + "-"*50)
         
+        # Track BigQuery execution time
+        bq_start = time.time()
+        
         # Configure query job with limits per guardrails
         job_config = bigquery.QueryJobConfig(
             use_query_cache=True,
@@ -491,6 +595,14 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None, user_type
         
         # Wait with timeout (30 seconds per guardrails)
         results = query_job.result(timeout=30).to_dataframe()
+        
+        bq_execution_time = time.time() - bq_start
+        
+        # Get bytes processed
+        bytes_processed = query_job.total_bytes_processed if query_job.total_bytes_processed else 0
+        
+        print(f"⏱️  BigQuery Execution: {bq_execution_time:.3f}s")
+        print(f"📊 Bytes Processed: {bytes_processed:,} bytes ({bytes_processed / 1024 / 1024:.2f} MB)")
         
         # Enforce max rows (per guardrails: 1000 rows)
         warning_msg = ""
@@ -515,6 +627,9 @@ def _execute_query(sql_query: str, current_user: Optional[str] = None, user_type
                         f"🚫 Security validation failed: Query returned unauthorized data.\n"
                         f"   This incident has been logged for audit and compliance."
                     ), None
+        
+        total_exec_time = time.time() - exec_start_time
+        print(f"⏱️  Total Execution (with validation): {total_exec_time:.3f}s")
         
         if results.empty:
             return "The query executed successfully but returned no results." + warning_msg, None
@@ -571,6 +686,12 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     Returns:
         Query results with SQL query included, or security error message
     """
+    tool_start_time = time.time()
+    sql_gen_time = None
+    sql_exec_time = None
+    rows_returned = None
+    bytes_processed = None
+    
     print(f"\n{'='*60}")
     print(f"[BQ Tool] Query: {natural_language_query}")
     print(f"[BQ Tool] Authenticated User: {current_user or 'NONE - DENIED'} ({user_type.upper()})")
@@ -578,6 +699,14 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
 
     # 1. Authentication check
     if not current_user:
+        total_time = time.time() - tool_start_time
+        log_performance_metric(
+            user='ANONYMOUS',
+            user_type=user_type,
+            query=natural_language_query,
+            total_time=total_time,
+            status='AUTH_FAILED'
+        )
         log_query_attempt(
             user='ANONYMOUS',
             query=natural_language_query,
@@ -589,6 +718,14 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     # 2. Layer 4: Rate Limiting
     is_allowed, limit_msg = rate_limiter.is_allowed(current_user)
     if not is_allowed:
+        total_time = time.time() - tool_start_time
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=natural_language_query,
+            total_time=total_time,
+            status='RATE_LIMITED'
+        )
         log_query_attempt(
             user=current_user,
             query=natural_language_query,
@@ -601,6 +738,14 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     if user_type == 'customer':
         is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
         if not is_allowed:
+            total_time = time.time() - tool_start_time
+            log_performance_metric(
+                user=current_user,
+                user_type=user_type,
+                query=natural_language_query,
+                total_time=total_time,
+                status='ACCESS_DENIED'
+            )
             print(f"[SECURITY] Blocked at NL level: {natural_language_query}")
             log_query_attempt(
                 user=current_user,
@@ -610,18 +755,30 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
             )
             return error_msg
 
-    # 4. Generate SQL with user context
+    # 4. Generate SQL with timing
+    sql_gen_start = time.time()
     sql_response = sql_generation_chain.invoke({
         "question": natural_language_query,
         "current_user": f"'{current_user}'",
         "user_type": user_type
     })
+    sql_gen_time = time.time() - sql_gen_start
     sql_query = sql_response.content.strip()
 
+    print(f"⏱️  SQL Generation: {sql_gen_time:.3f}s")
     print(f"[BQ Tool] Generated SQL: {sql_query[:150]}...")
 
     # 5. Check for access denied in SQL generation
     if "ACCESS_DENIED" in sql_query:
+        total_time = time.time() - tool_start_time
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=natural_language_query,
+            total_time=total_time,
+            sql_generation_time=sql_gen_time,
+            status='ACCESS_DENIED'
+        )
         log_query_attempt(
             user=current_user,
             query=natural_language_query,
@@ -635,16 +792,54 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
 
     # 6. Validate SQL query was generated properly
     if "cannot answer" in sql_query.lower():
+        total_time = time.time() - tool_start_time
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=natural_language_query,
+            total_time=total_time,
+            sql_generation_time=sql_gen_time,
+            status='GENERATION_FAILED'
+        )
         return "I'm sorry, but I cannot answer that question with the available database schema."
 
     sql_upper = sql_query.upper().replace("```SQL", "").replace("```", "").strip()
     if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH')):
+        total_time = time.time() - tool_start_time
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=natural_language_query,
+            total_time=total_time,
+            sql_generation_time=sql_gen_time,
+            status='INVALID_SQL'
+        )
         return "I encountered an issue generating a SQL query. Please try rephrasing your question."
 
-    # 7. Execute SQL with all security validations
+    # 7. Execute SQL with timing
+    sql_exec_start = time.time()
     text_result, df_result = _execute_query(sql_query, current_user, user_type)
+    sql_exec_time = time.time() - sql_exec_start
     
-    # 8. Log successful execution
+    if df_result is not None:
+        rows_returned = len(df_result)
+    
+    # 8. Calculate total time and log
+    total_time = time.time() - tool_start_time
+    
+    log_performance_metric(
+        user=current_user,
+        user_type=user_type,
+        query=natural_language_query,
+        total_time=total_time,
+        sql_generation_time=sql_gen_time,
+        sql_execution_time=sql_exec_time,
+        rows_returned=rows_returned,
+        bytes_processed=bytes_processed,
+        status='SUCCESS' if df_result is not None else 'ERROR'
+    )
+    
+    # Log audit
     if df_result is not None:
         log_query_attempt(
             user=current_user,
@@ -652,7 +847,6 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
             status='ALLOWED',
             row_count=len(df_result)
         )
-    # If df_result is None, error was already logged in _execute_query
     
     # 9. Build response with SQL at the top
     clean_sql = sql_query.strip().replace("```sql", "").replace("```", "")
@@ -710,10 +904,15 @@ if __name__ == "__main__":
     print(f"   • Max rows per query: 1000")
     print(f"   • Query timeout: 30 seconds")
     print(f"   • Max bytes billed: 1GB")
-    print(f"\n📝 Compliance:")
-    print(f"   • Audit log: mcp_security_audit.log")
-    print(f"   • All queries logged with timestamp, user, status")
-    print(f"   • Security violations trigger alerts")
+    print(f"\n📝 Logging:")
+    print(f"   • Security audit: mcp_security_audit.log")
+    print(f"   • Performance metrics: mcp_performance.log")
+    print(f"   • All queries logged with timing and status")
+    print("\n📊 Performance Tracking: ENABLED")
+    print(f"   • SQL generation time tracked")
+    print(f"   • SQL execution time tracked")
+    print(f"   • BigQuery bytes processed tracked")
+    print(f"   • Real-time metrics displayed")
     print("\n🚫 Prohibited Operations (per Banking Regulations):")
     print(f"   • DELETE, UPDATE, INSERT statements")
     print(f"   • Schema modifications (ALTER, CREATE, DROP)")
