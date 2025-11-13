@@ -5,9 +5,8 @@ Manages cached schema that refreshes every 7 days via cron job
 
 import config
 import json
-import os
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from google.cloud import bigquery
 from typing import Dict, List, Optional
 from langchain_google_vertexai import ChatVertexAI
@@ -228,7 +227,6 @@ def generate_intelligent_fallback(
     """
     # Analyze field names to understand table purpose
     field_names = [f['name'].lower() for f in schema_fields]
-    field_types = {f['name'].lower(): f['type'] for f in schema_fields}
     
     # Detect table type patterns
     has_id = any('id' in name for name in field_names)
@@ -385,13 +383,20 @@ Generate detailed context in pure JSON format (no markdown).""")
             
             print(f"     ✅ Gemini context validated and accepted")
             
+            # Handle sensitive field as either boolean or string
+            sensitive_value = context_json.get("sensitive", "true")
+            if isinstance(sensitive_value, bool):
+                is_sensitive = sensitive_value
+            else:
+                is_sensitive = str(sensitive_value).lower() == "true"
+
             return {
                 "description": context_json.get("description", ""),
                 "usage": context_json.get("usage", ""),
                 "business_context": context_json.get("business_context", ""),
                 "common_queries": context_json.get("common_queries", ""),
-                "sensitive": context_json.get("sensitive", "true").lower() == "true",
-                "row_level_security": context_json.get("sensitive", "true").lower() == "true"
+                "sensitive": is_sensitive,
+                "row_level_security": is_sensitive
             }
         else:
             raise ValueError("Could not extract JSON from response")
