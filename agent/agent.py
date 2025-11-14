@@ -192,7 +192,7 @@ elif USER_TYPE == 'merchant':
     user_context = f"Merchant can access ALL transactions to their store:\n   → You are logged in as {MERCHANT_NAME} ({CURRENT_USER_VPA}). You can view all incoming payments to your store."
 
 # --- Define the Main Agent with Vertex AI ---
-agent = Agent(
+root_agent = Agent(
     name="secure_banking_agent",
     model=Gemini(
         model_name="gemini-2.5-flash",
@@ -396,7 +396,8 @@ agent = Agent(
 # --- Create Runner ---
 session_service = InMemorySessionService()
 runner = Runner(
-    agent=agent,
+    app_name="agent",
+    agent=root_agent,
     session_service=session_service
 )
 
