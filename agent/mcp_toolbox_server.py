@@ -13,6 +13,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, Tuple
 from collections import defaultdict
+from google.cloud import storage, aiplatform
+from google.auth import default
+from google.auth.transport.requests import Request
+import requests
+import base64
+import uuid
+from google import genai
 
 # Import utilities
 from schema_cache_manager import (
@@ -50,6 +57,28 @@ perf_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(message)s'
 ))
 perf_logger.addHandler(perf_handler)
+
+
+# --- Configure Video Performance Logging ---
+video_perf_logger = logging.getLogger('video_performance')
+video_perf_logger.setLevel(logging.INFO)
+
+video_perf_handler = logging.FileHandler('video_generation_performance.log')
+video_perf_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(message)s'
+))
+video_perf_logger.addHandler(video_perf_handler)
+
+# --- Configure Video URL Storage ---
+video_url_logger = logging.getLogger('video_urls')
+video_url_logger.setLevel(logging.INFO)
+
+video_url_handler = logging.FileHandler('video_urls.log')
+video_url_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(message)s'
+))
+video_url_logger.addHandler(video_url_handler)
+
 
 def log_query_attempt(
     user: str,
@@ -117,6 +146,85 @@ def log_performance_metric(
         print(f"   • Bytes Processed: {bytes_processed:,} ({bytes_processed / 1024 / 1024:.2f} MB)")
     print(f"{'─'*60}\n")
 
+def log_video_performance_metric(
+    user: str,
+    user_type: str,
+    data_summary: str,
+    video_style: str,
+    duration: int,
+    prompt_length: int,
+    video_generation_time: float,
+    upload_time: float,
+    total_time: float,
+    video_size_mb: float,
+    video_url: str,
+    gcs_path: str,
+    status: str = "SUCCESS",
+    error_message: str = None
+):
+    """Log detailed video generation performance metrics"""
+    
+    metric = {
+        'timestamp': datetime.now().isoformat(),
+        'user': user,
+        'user_type': user_type,
+        'data_summary': data_summary[:200],  # Truncate long summaries
+        'video_style': video_style,
+        'duration_seconds': duration,
+        'prompt_length': prompt_length,
+        'timings': {
+            'video_generation': round(video_generation_time, 3),
+            'upload': round(upload_time, 3),
+            'total': round(total_time, 3)
+        },
+        'video_size_mb': round(video_size_mb, 2),
+        'gcs_path': gcs_path,
+        'video_url': video_url,
+        'status': status,
+        'error_message': error_message[:200] if error_message else None
+    }
+    
+    # Log to video performance file
+    video_perf_logger.info(json.dumps(metric))
+    
+    # Log URL separately for easy reference
+    if status == "SUCCESS":
+        video_url_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'user': user,
+            'user_type': user_type,
+            'video_url': video_url,
+            'gcs_path': gcs_path,
+            'duration': duration,
+            'size_mb': round(video_size_mb, 2),
+            'expires_at': (datetime.now() + timedelta(hours=24)).isoformat()
+        }
+        video_url_logger.info(json.dumps(video_url_entry))
+    
+    # Print detailed performance summary
+    print(f"\n{'═'*60}")
+    print(f"📹 VIDEO GENERATION PERFORMANCE REPORT")
+    print(f"{'═'*60}")
+    print(f"👤 User: {user} ({user_type.upper()})")
+    print(f"🎨 Style: {video_style} | Duration: {duration}s")
+    print(f"📝 Prompt Length: {prompt_length} characters")
+    print(f"\n⏱️  Timing Breakdown:")
+    print(f"   • Video Generation: {video_generation_time:.3f}s")
+    print(f"   • Upload to GCS: {upload_time:.3f}s")
+    print(f"   • Total Time: {total_time:.3f}s")
+    print(f"\n📦 Video Details:")
+    print(f"   • Size: {video_size_mb:.2f} MB")
+    print(f"   • Format: MP4 (16:9)")
+    print(f"   • Status: {status}")
+    if status == "SUCCESS":
+        print(f"\n💾 Storage:")
+        print(f"   • GCS Path: {gcs_path}")
+        print(f"   • URL Expires: 24 hours")
+    elif error_message:
+        print(f"\n❌ Error: {error_message[:100]}...")
+    print(f"{'═'*60}\n")
+
+
 # --- Rate Limiter (Layer 4) ---
 class RateLimiter:
     def __init__(self, max_queries_per_minute=10, max_queries_per_session=100):
@@ -175,11 +283,32 @@ if not hasattr(config, 'GCP_LOCATION'):
     config.GCP_LOCATION = "us-central1"
     print(f"⚠️  GCP_LOCATION not set in config. Using default: {config.GCP_LOCATION}")
 
+# --- Verify Video Storage GCP Configuration ---
+if not hasattr(config, 'VIDEO_GCP_PROJECT_ID') or not config.VIDEO_GCP_PROJECT_ID:
+    print("⚠️  VIDEO_GCP_PROJECT_ID not set, using main project for video storage")
+    config.VIDEO_GCP_PROJECT_ID = config.GCP_PROJECT_ID
+
+if not hasattr(config, 'VIDEO_GCP_LOCATION'):
+    config.VIDEO_GCP_LOCATION = config.GCP_LOCATION
+    print(f"⚠️  VIDEO_GCP_LOCATION not set, using: {config.VIDEO_GCP_LOCATION}")
+
+if not hasattr(config, 'VIDEO_GCS_BUCKET'):
+    config.VIDEO_GCS_BUCKET = "mcp_chatbot"
+    print(f"⚠️  VIDEO_GCS_BUCKET not set, using default: {config.VIDEO_GCS_BUCKET}")
+
+if not hasattr(config, 'VIDEO_GCS_PATH'):
+    config.VIDEO_GCS_PATH = "videos"
+
 print(f"\n📍 Vertex AI Configuration:")
 print(f"   Project: {config.GCP_PROJECT_ID}")
 print(f"   Location: {config.GCP_LOCATION}")
 
-print("\n[1/5] Initializing AI models with Vertex AI...")
+print(f"\n📹 Video Storage Configuration:")
+print(f"   Project: {config.VIDEO_GCP_PROJECT_ID}")
+print(f"   Location: {config.VIDEO_GCP_LOCATION}")
+print(f"   Bucket: gs://{config.VIDEO_GCS_BUCKET}/{config.VIDEO_GCS_PATH}")
+
+print("\n[1/6] Initializing AI models with Vertex AI...")
 llm = ChatVertexAI(
     model_name="gemini-2.5-flash",
     project=config.GCP_PROJECT_ID,
@@ -194,12 +323,12 @@ embeddings = VertexAIEmbeddings(
 )
 print("✓ LLM and Embeddings initialized (Vertex AI)")
 
-print("\n[2/5] Connecting to BigQuery...")
+print("\n[2/6] Connecting to BigQuery...")
 bq_client = bigquery.Client(project=config.GCP_PROJECT_ID)
 print(f"✓ Connected to project: {config.GCP_PROJECT_ID}")
 
 # --- Fetch Dynamic Schema ---
-print("\n[3/5] Loading schema from cache...")
+print("\n[3/6] Loading schema from cache...")
 try:
     schema_info, table_contexts, formatted_schema = load_or_refresh_schema(
         bq_client=bq_client,
@@ -222,7 +351,7 @@ except Exception as e:
     raise
 
 # --- Display Schema ---
-print("\n[4/5] Schema loaded successfully")
+print("\n[4/6] Schema loaded successfully")
 print("\n" + "="*60)
 print("📚 SCHEMA SUMMARY:")
 print("="*60)
@@ -231,7 +360,7 @@ for table_name in schema_info.keys():
 print("="*60 + "\n")
 
 # --- Load Vector Store ---
-print("[5/5] Loading vector store for PDF queries...")
+print("[5/6] Loading vector store for PDF queries...")
 try:
     vector_store = FAISS.load_local(
         config.VECTOR_STORE_PATH,
@@ -245,8 +374,169 @@ except Exception as e:
     print("Please run 'python -m agent.pdf_indexer' first to create the vector store.")
     raise
 
+print("\n[6/6] Initializing Vertex AI for Veo 3.1...")
+try:
+    import vertexai
+    from google.oauth2 import service_account
+
+    # Load video service account credentials
+    video_credentials = service_account.Credentials.from_service_account_file(
+        config.VIDEO_SERVICE_ACCOUNT_KEY,
+        scopes=['https://www.googleapis.com/auth/cloud-platform']
+    )
+
+    # Initialize Vertex AI with video project and credentials
+    vertexai.init(
+        project=config.VIDEO_GCP_PROJECT_ID,
+        location=config.VIDEO_GCP_LOCATION,
+        credentials=video_credentials
+    )
+    print(f"✓ Vertex AI initialized for video generation")
+    print(f"  Project: {config.VIDEO_GCP_PROJECT_ID}")
+    print(f"  Credentials: {config.VIDEO_SERVICE_ACCOUNT_KEY}")
+    VEO_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️  Warning: Could not initialize Vertex AI: {e}")
+    VEO_AVAILABLE = False
+
+def _generate_video_with_veo31(prompt: str, speech_text: str = None, duration: int = 5, reference_image_path: str = None) -> bytes:
+    """
+    Generate video using Veo 3.1 via Gemini API with optional lip-sync
+
+    Args:
+        prompt: Video generation prompt (scene description)
+        speech_text: Text to be spoken with lip-sync (optional)
+        duration: Video duration in seconds (4, 6, or 8)
+        reference_image_path: Path to reference image for character consistency
+
+    Returns:
+        Video bytes
+    """
+    try:
+        print(f"[VEO] Starting video generation with Veo 3.1 (Gemini API)...")
+        print(f"[VEO] Duration: {duration}s")
+
+        # Clamp duration to valid values
+        if duration <= 4:
+            duration = 4
+        elif duration <= 6:
+            duration = 6
+        else:
+            duration = 8
+
+        # Initialize Gemini client
+        client = genai.Client(api_key=config.GOOGLE_API_KEY)
+
+        # Build complete prompt with speech text for lip-sync
+        complete_prompt = prompt
+        if speech_text:
+            print(f"[VEO] Speech text: {speech_text[:100]}...")
+            # Include the actual speech text in the prompt for lip-sync
+            complete_prompt = f"{prompt}\n\nThe person says: \"{speech_text}\" with clear lip-sync and natural expression."
+
+        print(f"[VEO] Prompt: {complete_prompt[:150]}...")
+
+        # Load reference image if provided
+        reference_image = None
+        if reference_image_path:
+            import os
+            from google.genai import types
+            if os.path.exists(reference_image_path):
+                print(f"[VEO] Loading reference image: {reference_image_path}")
+                # Read image bytes
+                with open(reference_image_path, 'rb') as img_file:
+                    image_bytes = img_file.read()
+
+                # Determine mime type
+                mime_type = "image/png" if reference_image_path.lower().endswith('.png') else "image/jpeg"
+
+                # Create Image object for Gemini API
+                reference_image = types.Image(
+                    imageBytes=image_bytes,
+                    mimeType=mime_type
+                )
+                print(f"[VEO] ✓ Reference image loaded ({len(image_bytes)} bytes, {mime_type})")
+            else:
+                print(f"[VEO] ⚠️  Reference image not found: {reference_image_path}")
+
+        # Start video generation with reference image
+        print(f"[VEO] Initiating video generation request...")
+        operation = client.models.generate_videos(
+            model="veo-3.1-generate-preview",
+            prompt=complete_prompt,
+            image=reference_image  # Use reference image as the base
+        )
+
+        operation_id = operation.name.split('/')[-1]
+        print(f"[VEO] ✅ Operation started: {operation_id}")
+        print(f"[VEO] ⏳ Polling for completion (this takes 1-3 minutes)...")
+
+        # Poll for completion
+        max_wait_time = 600  # 10 minutes max
+        poll_interval = 10  # Poll every 10 seconds
+        start_time = time.time()
+        poll_count = 0
+
+        while not operation.done:
+            elapsed = time.time() - start_time
+
+            if elapsed > max_wait_time:
+                raise Exception(f"Video generation timed out after {int(elapsed)} seconds")
+
+            poll_count += 1
+            if poll_count % 3 == 1:  # Print every 30 seconds
+                print(f"[VEO] Polling... ({int(elapsed)}s elapsed)")
+
+            time.sleep(poll_interval)
+
+            # Refresh operation status
+            operation = client.operations.get(operation)
+
+        # Operation completed
+        gen_time = time.time() - start_time
+        print(f"[VEO] ✅ Operation completed in {gen_time:.1f}s!")
+
+        # Check response
+        response = operation.response
+
+        # Check for filtered content
+        if hasattr(response, 'rai_media_filtered_count') and response.rai_media_filtered_count:
+            filtered_reasons = response.rai_media_filtered_reasons or []
+            error_msg = f"Content filtered by safety policies. Try simpler, less specific prompts. Reasons: {filtered_reasons}"
+            print(f"[VEO] ❌ {error_msg}")
+            raise Exception(error_msg)
+
+        # Get generated videos
+        if not response.generated_videos:
+            raise Exception("No videos generated in response")
+
+        video = response.generated_videos[0]
+        video_uri = video.video.uri
+
+        print(f"[VEO] Downloading video from Google servers...")
+
+        # Download video bytes with API key authentication
+        download_headers = {
+            "x-goog-api-key": config.GOOGLE_API_KEY
+        }
+        download_response = requests.get(video_uri, headers=download_headers, timeout=60)
+
+        if download_response.status_code != 200:
+            raise Exception(f"Video download failed: {download_response.status_code}")
+
+        video_bytes = download_response.content
+        print(f"[VEO] ✓ Video downloaded successfully ({len(video_bytes)} bytes, {len(video_bytes)/(1024*1024):.2f} MB)")
+
+        return video_bytes
+
+    except Exception as e:
+        print(f"[VEO] ❌ Error: {e}")
+        raise Exception(f"Veo 3.1 generation failed: {e}")
+
+    
+
 print("\n" + "="*60)
-print("✅ ALL RESOURCES INITIALIZED SUCCESSFULLY (VERTEX AI)")
+print("✅ ALL RESOURCES INITIALIZED SUCCESSFULLY (VERTEX AI + VEO 3.1)")
 print("="*60 + "\n")
 
 # --- 2. CREATE FastMCP INSTANCE ---
@@ -888,14 +1178,325 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     
     return "\n".join(response_parts)
 
+
+@mcp.tool
+def generate_video_from_data(
+    data_summary: str,
+    video_style: str = "professional",
+    duration: int = 5,
+    current_user: str = None,
+    user_type: str = 'customer'
+) -> str:
+    """
+    Generates a video visualization using Veo 3.1 based on data analysis results.
+    
+    Use this when users request visual presentations of their financial data,
+    transaction summaries, or banking insights in video format.
+    
+    IMPORTANT: Always query the database FIRST to get actual data, then pass the
+    results summary to this tool for video generation.
+    
+    Args:
+        data_summary: Detailed description of the data to visualize (include actual numbers, trends, insights)
+        video_style: Style of video - options: "professional", "animated", "infographic", "modern"
+        duration: Video duration in seconds (5-10 seconds recommended, max 10)
+        current_user: The authenticated user making the request (REQUIRED)
+        user_type: Type of user ('customer' or 'merchant')
+    
+    Returns:
+        GCS URL and download link for the generated video with performance metrics
+    """
+    tool_start_time = time.time()
+    
+    # Initialize timing variables
+    video_generation_time = 0
+    upload_time = 0
+    video_size_mb = 0
+    video_url = ""
+    gcs_path = ""
+    prompt_length = 0
+    
+    # Authentication check
+    if not current_user:
+        log_performance_metric(
+            user='ANONYMOUS',
+            user_type=user_type,
+            query=data_summary[:200],
+            total_time=time.time() - tool_start_time,
+            status='AUTH_FAILED'
+        )
+        return "🚫 Access Denied: Authentication required to generate videos."
+    
+    # Check if Veo is available
+    if not VEO_AVAILABLE:
+        return "❌ Video generation is currently unavailable. Vertex AI could not be initialized."
+    
+    print(f"\n{'='*60}")
+    print(f"[VIDEO Tool] User: {current_user} ({user_type.upper()})")
+    print(f"[VIDEO Tool] Data Summary: {data_summary[:150]}...")
+    print(f"[VIDEO Tool] Style: {video_style} | Duration: {duration}s")
+    print(f"[VIDEO Tool] Storage Project: {config.VIDEO_GCP_PROJECT_ID}")
+    print(f"{'='*60}")
+    
+    try:
+        # Validate duration (clamp to Veo 3.1 valid values: 4, 6, 8)
+        if duration <= 4:
+            duration = 4
+        elif duration <= 6:
+            duration = 6
+        else:
+            duration = 8
+
+        # Get reference image path
+        import os
+        reference_image = os.path.join(config.PROJECT_ROOT, "assets", "image.png")
+
+        # Create speech text from data_summary for lip-sync
+        # Format the data summary as natural speech
+        speech_text = f"Hello! Let me share your banking information. {data_summary}"
+
+        # Limit speech text to reasonable length for video duration
+        max_speech_length = 150 if duration == 4 else (250 if duration == 6 else 350)
+        if len(speech_text) > max_speech_length:
+            speech_text = speech_text[:max_speech_length].rsplit(' ', 1)[0] + "."
+
+        # Create video prompt for a speaking banker
+        if user_type == 'customer':
+            context = "A professional bank representative presenting customer account information"
+        else:
+            context = "A professional financial advisor presenting merchant sales data"
+
+        video_prompt = f"""{context} in a modern office setting.
+The person speaks directly to the camera with a friendly, professional demeanor.
+The background shows a bright, professional banking office.
+The person maintains eye contact and uses natural hand gestures while speaking.
+Lighting is professional and warm.
+Style: {video_style}, corporate, trustworthy."""
+
+        prompt_length = len(video_prompt)
+
+        print(f"\n[VIDEO] Generating lip-sync video with Veo 3.1...")
+        print(f"[VIDEO] Duration: {duration}s")
+        print(f"[VIDEO] Speech text: {speech_text[:80]}...")
+        print(f"[VIDEO] Reference image: {reference_image}")
+        print(f"[VIDEO] Prompt length: {prompt_length} characters")
+
+        # Track generation time
+        gen_start_time = time.time()
+
+        # Generate video using Veo 3.1 with reference image and lip-sync
+        video_bytes = _generate_video_with_veo31(
+            prompt=video_prompt,
+            speech_text=speech_text,
+            duration=duration,
+            reference_image_path=reference_image
+        )
+
+        video_generation_time = time.time() - gen_start_time
+        video_size_mb = len(video_bytes) / (1024 * 1024)
+
+        print(f"⏱️  Video Generation: {video_generation_time:.3f}s")
+        print(f"📦 Video Size: {video_size_mb:.2f} MB")
+
+        # Upload to GCS (using separate video storage project)
+        upload_start_time = time.time()
+        print(f"\n[VIDEO] Uploading to GCS in project: {config.VIDEO_GCP_PROJECT_ID}...")
+
+        # Initialize storage client with video storage project and credentials
+        from google.oauth2 import service_account
+        video_credentials = service_account.Credentials.from_service_account_file(
+            config.VIDEO_SERVICE_ACCOUNT_KEY,
+            scopes=['https://www.googleapis.com/auth/cloud-platform']
+        )
+        storage_client = storage.Client(project=config.VIDEO_GCP_PROJECT_ID, credentials=video_credentials)
+        bucket = storage_client.bucket(config.VIDEO_GCS_BUCKET)
+        
+        # Verify bucket exists and is accessible
+        try:
+            bucket.reload()
+            print(f"✓ Bucket accessible: gs://{config.VIDEO_GCS_BUCKET}")
+        except Exception as bucket_error:
+            error_msg = f"Cannot access bucket in project {config.VIDEO_GCP_PROJECT_ID}: {str(bucket_error)}"
+            print(f"❌ {error_msg}")
+            raise Exception(error_msg)
+        
+        # Create unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_id = uuid.uuid4().hex[:8]
+        video_filename = f"{config.VIDEO_GCS_PATH}/{current_user}_{user_type}_{timestamp}_{video_id}.mp4"
+        
+        blob = bucket.blob(video_filename)
+        blob.upload_from_string(video_bytes, content_type='video/mp4')
+
+        upload_time = time.time() - upload_start_time
+        print(f"⏱️  Upload Time: {upload_time:.3f}s")
+
+        # Make video publicly accessible (using uniform bucket-level access)
+        blob.cache_control = "public, max-age=3600"
+        blob.patch()
+
+        # Get public URL (works with uniform bucket-level access)
+        video_url = f"https://storage.googleapis.com/{config.VIDEO_GCS_BUCKET}/{video_filename}"
+        print(f"✓ Video is publicly accessible")
+        print(f"✓ Public URL: {video_url}")
+        gcs_path = f"gs://{config.VIDEO_GCS_BUCKET}/{video_filename}"
+        total_time = time.time() - tool_start_time
+        
+        print(f"✓ Video uploaded to: {gcs_path}")
+        print(f"✓ Project: {config.VIDEO_GCP_PROJECT_ID}")
+        print(f"⏱️  Total Time: {total_time:.3f}s")
+        
+        # Log detailed video performance metrics
+        log_video_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            data_summary=data_summary,
+            video_style=video_style,
+            duration=duration,
+            prompt_length=prompt_length,
+            video_generation_time=video_generation_time,
+            upload_time=upload_time,
+            total_time=total_time,
+            video_size_mb=video_size_mb,
+            video_url=video_url,
+            gcs_path=gcs_path,
+            status='SUCCESS'
+        )
+        
+        # Also log to general performance metrics
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=f"VIDEO_GEN: {data_summary[:100]}",
+            total_time=total_time,
+            sql_generation_time=video_generation_time,
+            sql_execution_time=upload_time,
+            bytes_processed=len(video_bytes),
+            status='SUCCESS'
+        )
+        
+        # Log audit with project information
+        audit_logger.info(json.dumps({
+            'timestamp': datetime.now().isoformat(),
+            'user': current_user,
+            'user_type': user_type,
+            'action': 'video_generation_success',
+            'storage_project': config.VIDEO_GCP_PROJECT_ID,
+            'video_path': gcs_path,
+            'video_url': video_url,
+            'video_size_mb': round(video_size_mb, 2),
+            'duration': duration,
+            'style': video_style,
+            'timings': {
+                'generation': round(video_generation_time, 3),
+                'upload': round(upload_time, 3),
+                'total': round(total_time, 3)
+            }
+        }))
+        
+        # Build enhanced response with performance metrics and project info
+        return f"""✅ **Video Generated Successfully!**
+
+🎬 **What Was Created:**
+A professional banker speaks your banking information with accurate lip-sync and natural expressions!
+
+📹 **Video Details:**
+   • Duration: {duration} seconds
+   • Style: {video_style.capitalize()}
+   • Size: {video_size_mb:.2f} MB
+   • Format: MP4 (16:9, 720p)
+   • Speaker: Professional banker from reference image
+
+⚡ **Performance Metrics:**
+   • Video Generation: {video_generation_time:.2f}s (including polling)
+   • Upload to GCS: {upload_time:.2f}s
+   • Total Time: {total_time:.2f}s
+
+🌐 **PUBLIC VIDEO URL** (Anyone can access):
+   {video_url}
+
+📍 **Storage Location:**
+   • GCS Path: {gcs_path}
+   • Bucket: {config.VIDEO_GCS_BUCKET}
+   • Project: {config.VIDEO_GCP_PROJECT_ID}
+
+✨ **Features:**
+   ✓ Publicly accessible (no authentication required)
+   ✓ No expiration - permanent link
+   ✓ Direct streaming from GCS
+   ✓ HD quality with lip-sync
+
+💡 **Share this URL with anyone** - they can view the video directly in their browser!"""
+        
+    except Exception as e:
+        total_time = time.time() - tool_start_time
+        error_msg = str(e)
+        
+        # Log video-specific error metrics
+        log_video_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            data_summary=data_summary,
+            video_style=video_style,
+            duration=duration,
+            prompt_length=prompt_length,
+            video_generation_time=video_generation_time,
+            upload_time=upload_time,
+            total_time=total_time,
+            video_size_mb=video_size_mb,
+            video_url="",
+            gcs_path="",
+            status='ERROR',
+            error_message=error_msg
+        )
+        
+        # Also log to general performance metrics
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=f"VIDEO_GEN: {data_summary[:100]}",
+            total_time=total_time,
+            status='ERROR'
+        )
+        
+        # Log audit error with project info
+        audit_logger.error(json.dumps({
+            'timestamp': datetime.now().isoformat(),
+            'user': current_user,
+            'user_type': user_type,
+            'action': 'video_generation_failed',
+            'storage_project': config.VIDEO_GCP_PROJECT_ID,
+            'error': error_msg[:200],
+            'total_time': round(total_time, 3)
+        }))
+        
+        print(f"❌ Video generation failed: {error_msg}")
+        
+        if "quota" in error_msg.lower() or "429" in error_msg:
+            return "⚠️ Video generation quota exceeded. Please try again later."
+        elif "timeout" in error_msg.lower():
+            return "⏱️ Video generation timed out. Please try again with a simpler request."
+        elif "401" in error_msg or "403" in error_msg or "Cannot access bucket" in error_msg:
+            return f"🔒 Storage access error in project {config.VIDEO_GCP_PROJECT_ID}. Please check permissions and bucket existence."
+        else:
+            return f"❌ Failed to generate video: {error_msg}\n\nPlease try again or contact support."
+              
 # --- 6. Run the Server ---
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("🚀 Starting MCP Toolbox Server with Security Guardrails")
     print("=" * 60)
-    print(f"🌐 Project: {config.GCP_PROJECT_ID}")
+    print(f"🌐 Main Project: {config.GCP_PROJECT_ID}")
     print(f"📍 Location: {config.GCP_LOCATION}")
-    print(f"🔒 Security Implementation:")
+    print(f"\n🎬 Video Generation:")
+    print(f"   ✓ Veo 3.1 Model: {'Enabled' if VEO_AVAILABLE else 'Disabled'}")
+    print(f"   ✓ Storage Project: {config.VIDEO_GCP_PROJECT_ID}")
+    print(f"   ✓ Storage Location: {config.VIDEO_GCP_LOCATION}")
+    print(f"   ✓ Bucket: gs://{config.VIDEO_GCS_BUCKET}/{config.VIDEO_GCS_PATH}")
+    print(f"   ✓ Signed URLs: 24-hour expiry")
+    if config.VIDEO_GCP_PROJECT_ID != config.GCP_PROJECT_ID:
+        print(f"   ⚠️  Using separate project for video storage (testing)")
+    print(f"\n🔒 Security Implementation:")
     print(f"   ✓ Layer 1: Query Parser & Validator")
     print(f"   ✓ Layer 2: Database READ-ONLY Permissions")
     print(f"   ✓ Layer 3: Row-Level Security")
@@ -907,10 +1508,13 @@ if __name__ == "__main__":
     print(f"\n📝 Logging:")
     print(f"   • Security audit: mcp_security_audit.log")
     print(f"   • Performance metrics: mcp_performance.log")
+    print(f"   • Video performance: video_generation_performance.log")
+    print(f"   • Video URLs: video_urls.log")
     print(f"   • All queries logged with timing and status")
     print("\n📊 Performance Tracking: ENABLED")
     print(f"   • SQL generation time tracked")
     print(f"   • SQL execution time tracked")
+    print(f"   • Video generation time tracked")
     print(f"   • BigQuery bytes processed tracked")
     print(f"   • Real-time metrics displayed")
     print("\n🚫 Prohibited Operations (per Banking Regulations):")
@@ -919,6 +1523,7 @@ if __name__ == "__main__":
     print(f"   • Administrative commands (GRANT, REVOKE)")
     print(f"\n✅ Allowed Operations:")
     print(f"   • SELECT queries only (READ-ONLY access)")
+    print(f"   • Video generation from query results")
     print("=" * 60)
     
     mcp.run(

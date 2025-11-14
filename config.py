@@ -39,6 +39,19 @@ VECTOR_STORE_PATH_OPENAI = os.path.join(PROJECT_ROOT, "vector_store_openai")
 # Builds full path to 'MCP/vector_store_gemini'
 VECTOR_STORE_PATH = os.path.join(PROJECT_ROOT, "vector_store_gemini")
 
+# GCS_VIDEO_BUCKET = os.getenv("GCS_VIDEO_BUCKET")
+
+# VIDEO_DEFAULT_DURATION = 8  # seconds
+# VIDEO_STORAGE_PATH = "videos/"
+
+# Video Generation Configuration (Using Main Project)
+VIDEO_GCP_PROJECT_ID = GCP_PROJECT_ID  # Use same project as main
+VIDEO_GCP_LOCATION = GCP_LOCATION  # Same location as main project
+VIDEO_GCS_BUCKET = "mcp_chatbot"  # Video storage bucket
+VIDEO_GCS_PATH = "videos"  # Folder path within bucket
+
+# Use main service account for video operations
+VIDEO_SERVICE_ACCOUNT_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
 # --- 6. Validation ---
 if not all([GCP_PROJECT_ID, BIGQUERY_DATASET, GOOGLE_API_KEY]):
